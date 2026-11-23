@@ -3,6 +3,7 @@
  * a child process on a throw-away database file and talk to it over HTTP, the way a client would.
  * A second connection to the same file is used only to count rows (certificates, audit events).
  */
+import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -23,12 +24,25 @@ export const SEED = Object.freeze({
   west: { safety101: 4, heights: 5, manualHandling: 6, alexLeeCertificate: 8, certificateCount: 4 },
 });
 
+// Temporary directories are removed by the suites themselves; this is the safety net for a run
+// that is interrupted (Ctrl+C, a test runner timeout) before their `after` hooks get the chance.
+const tempDirs = new Set();
+process.on('exit', () => {
+  for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => process.exit(signal === 'SIGINT' ? 130 : 143)); // runs the exit handler above
+}
+
 export function createTempDir(prefix = 'cert-admin-test-') {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.add(dir);
+  return dir;
 }
 
 export function removeTempDir(dir) {
   fs.rmSync(dir, { recursive: true, force: true });
+  tempDirs.delete(dir);
 }
 
 /**
@@ -69,13 +83,21 @@ export function runScriptToExit(script, args = [], options) {
   return runNodeToExit([path.join('scripts', script), ...args], options);
 }
 
+// Everything a server under test depends on is pinned here, so settings exported in the
+// developer's shell (HOST, EXPORT_...) cannot change what the tests observe. SQLITE_DRIVER and
+// DB_BUSY_TIMEOUT_MS are inherited on purpose: the suite is meant to be run with either driver.
 const serverEnv = (dbPath, env) => ({
   PORT: '0',
+  HOST: '127.0.0.1',
   DB_PATH: dbPath,
   LOG_REQUESTS: '0',
   STATIC_DIR: path.join(BACKEND_DIR, 'no-frontend'),
+  EXPORT_MAX_CONCURRENT: '',
+  EXPORT_IDLE_TIMEOUT_MS: '',
   ...env,
 });
+
+const EXIT_WITH_PARENT = path.join('test', 'support', 'exit-with-parent.mjs');
 
 /** For start-ups that are expected to fail: runs `src/server.js` until it exits, `{ code, output }`. */
 export function runServerToExit(dbPath, { env = {} } = {}) {
@@ -85,11 +107,13 @@ export function runServerToExit(dbPath, { env = {} } = {}) {
 /** Starts `src/server.js` on a free port and resolves once it accepts requests. */
 export function startServer(dbPath, { env = {} } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [path.join('src', 'server.js')], {
+    // stdin is a pipe held by this process: see test/support/exit-with-parent.mjs.
+    const child = spawn(process.execPath, ['--import', `./${EXIT_WITH_PARENT.replaceAll(path.sep, '/')}`, path.join('src', 'server.js')], {
       cwd: BACKEND_DIR,
       env: { ...process.env, ...serverEnv(dbPath, env) },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
+    child.stdin.on('error', () => {}); // the server may already be gone when the pipe is closed
     let output = '';
     let settled = false;
     const timer = setTimeout(() => fail(new Error(`Server did not start in time:\n${output}`)), 20_000);
@@ -275,12 +299,67 @@ export function openStream(baseUrl, urlPath, actorEmail) {
   });
 }
 
-/** SQLite's NOCASE collation: ASCII letters fold, everything else compares by code point. */
-export function nocaseCompare(a, b) {
-  const fold = (text) => text.replace(/[A-Z]/g, (ch) => ch.toLowerCase());
-  const x = fold(a);
-  const y = fold(b);
+/**
+ * What search and sort are expected to make of a name: case and accents do not count. Written
+ * independently of the application's own folding (src/lib/text.js) so the two can disagree.
+ */
+export function referenceFold(text) {
+  return text
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLowerCase();
+}
+
+/** Order of two names when sorted ignoring case and accents. */
+export function foldedCompare(a, b) {
+  const x = referenceFold(a);
+  const y = referenceFold(b);
   return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/**
+ * Fails with a short, readable message when two row lists differ. (assert.deepEqual on thousands
+ * of rows spends minutes and gigabytes on rendering the difference.)
+ */
+export function assertSameRows(actual, expected, label) {
+  const render = (row) => JSON.stringify(row);
+  if (actual.length !== expected.length) {
+    const known = new Set(expected.map(render));
+    const extra = actual.filter((row) => !known.has(render(row))).slice(0, 3);
+    throw new assert.AssertionError({
+      message: `${label}: ${actual.length} rows instead of ${expected.length}${extra.length ? `; unexpected, for example: ${extra.map(render).join(' ')}` : ''}`,
+    });
+  }
+  for (let i = 0; i < expected.length; i += 1) {
+    if (render(actual[i]) !== render(expected[i])) {
+      throw new assert.AssertionError({
+        message: `${label}: row ${i} differs\n  actual:   ${render(actual[i])}\n  expected: ${render(expected[i])}`,
+      });
+    }
+  }
+}
+
+/**
+ * Starts test/support/hold-lock.mjs and resolves once it holds the write lock on `file` (a new
+ * database in rollback-journal mode). It releases the lock by itself after `holdMs`.
+ * Resolves with `{ exited: Promise<number> }`.
+ */
+export function holdRollbackJournalLock(file, holdMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join('test', 'support', 'hold-lock.mjs'), file, String(holdMs)], {
+      cwd: BACKEND_DIR,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    const exited = new Promise((done) => child.on('close', (code) => done(code)));
+    child.stderr.on('data', (chunk) => (output += chunk));
+    child.stdout.on('data', (chunk) => {
+      output += chunk;
+      if (output.includes('locked')) resolve({ exited });
+    });
+    child.on('error', reject);
+    exited.then((code) => reject(new Error(`hold-lock exited with code ${code} before taking the lock:\n${output}`)));
+  });
 }
 
 /** Resolves to true when `promise` has neither fulfilled nor rejected after `ms` milliseconds. */
@@ -294,6 +373,15 @@ export function stillPending(promise, ms) {
     () => false,
   );
   return Promise.race([settled, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** Waits until `predicate()` holds; fails with `label` when it still does not after `timeoutMs`. */
+export async function until(predicate, { timeoutMs = 5_000, label = 'the expected state' } = {}) {
+  const deadline = performance.now() + timeoutMs;
+  while (!predicate()) {
+    if (performance.now() > deadline) throw new assert.AssertionError({ message: `Timed out after ${timeoutMs} ms waiting for ${label}` });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 export async function timed(fn) {

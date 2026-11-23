@@ -15,7 +15,11 @@ export function assertPlainText(value, label, { allowLineBreaks = false } = {}) 
   }
 }
 
-/** First of the given query parameter names that is present, as a trimmed string. */
+/**
+ * The first of the given query parameter names that carries a value, as a trimmed string.
+ * A parameter that is present but blank (`?sort=`) counts as not given, so the next name - or the
+ * caller's default - applies.
+ */
 export function queryString(query, names, { maxLength = 200 } = {}) {
   for (const name of names) {
     const value = query[name];
@@ -24,16 +28,20 @@ export function queryString(query, names, { maxLength = 200 } = {}) {
     const text = value.trim();
     assertPlainText(text, `Query parameter "${name}"`);
     if (text.length > maxLength) throw badRequest(`Query parameter "${name}" must be at most ${maxLength} characters`);
-    return text;
+    if (text !== '') return text;
   }
   return undefined;
 }
 
+/**
+ * Like queryString, for whole numbers within [min, max]. Both limits must be safely below 2^53:
+ * a digit string too long to be converted exactly is then far beyond `max` either way.
+ */
 export function queryInteger(query, names, { min, max, fallback }) {
   for (const name of names) {
-    if (query[name] === undefined) continue;
     const text = queryString(query, [name]);
-    if (!/^\d{1,9}$/.test(text)) throw badRequest(`Query parameter "${name}" must be a whole number`);
+    if (text === undefined) continue;
+    if (!/^\d+$/.test(text)) throw badRequest(`Query parameter "${name}" must be a whole number`);
     const value = Number(text);
     if (value < min || value > max) throw badRequest(`Query parameter "${name}" must be between ${min} and ${max}`);
     return value;

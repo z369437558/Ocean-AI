@@ -2,15 +2,19 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
+import { loadConfig } from '../src/config.js';
+import { formatGeneratedSerial } from '../src/db/generate.js';
 import { SCHEMA_VERSION, migrate } from '../src/db/schema.js';
 import { seedDemoData } from '../src/db/seed.js';
 import { TransactionAbortedError, enableWal, isBusyError, openDatabase } from '../src/db/sqlite.js';
 import { csvCell, csvRow } from '../src/lib/csv.js';
 import { canonicalJson, requestFingerprint } from '../src/lib/fingerprint.js';
+import { LimiterFullError, createLimiter } from '../src/lib/limiter.js';
+import { foldText } from '../src/lib/text.js';
 import { localDate, localDateTime, utcOffset } from '../src/lib/time.js';
-import { parseListQuery } from '../src/services/certificates.js';
+import { buildExportPlan, parseListQuery, streamCsvExport } from '../src/services/certificates.js';
 import { classifyEnrollment } from '../src/services/courses.js';
-import { createTempDir, parseCsv, removeTempDir, stillPending } from './helpers.js';
+import { createTempDir, holdRollbackJournalLock, parseCsv, referenceFold, removeTempDir, stillPending } from './helpers.js';
 
 describe('time zones (A5)', () => {
   it('converts the reference instant to each tenant-local wall clock', () => {
@@ -140,23 +144,45 @@ describe('list query parsing', () => {
     assert.deepEqual(parseListQuery({ sort: 'learner' }).order, 'asc');
   });
 
+  const sortAndOrder = (query) => (({ sort, order }) => ({ sort, order }))(parseListQuery(query));
+
   it('accepts aliases and a leading minus for descending', () => {
     assert.equal(parseListQuery({ sort: 'serial_number' }).sort, 'serial');
+    assert.equal(parseListQuery({ sort: 'serial-number' }).sort, 'serial');
+    assert.equal(parseListQuery({ sort: 'SerialNumber' }).sort, 'serial');
+    assert.equal(parseListQuery({ sort: 'issuedLocalDate' }).sort, 'issued');
+    assert.equal(parseListQuery({ sort: 'course_title' }).sort, 'course');
     assert.equal(parseListQuery({ sort: 'learnerName', order: 'DESC' }).order, 'desc');
-    assert.deepEqual(
-      (({ sort, order }) => ({ sort, order }))(parseListQuery({ sort: '-issued_at' })),
-      { sort: 'issued', order: 'desc' },
-    );
+    assert.deepEqual(sortAndOrder({ sort: '-issued_at' }), { sort: 'issued', order: 'desc' });
+    assert.deepEqual(sortAndOrder({ sort: '-learner' }), { sort: 'learner', order: 'desc' });
+    assert.deepEqual(sortAndOrder({ sort: '-learner', order: 'asc' }), { sort: 'learner', order: 'asc' }, 'an explicit order wins');
     assert.equal(parseListQuery({ search: '  lee ' }).q, 'lee');
+  });
+
+  it('treats a blank parameter as not given', () => {
+    assert.deepEqual(sortAndOrder({ sort: '-learner', order: '' }), { sort: 'learner', order: 'desc' });
+    assert.deepEqual(sortAndOrder({ sort: '', sortBy: 'course' }), { sort: 'course', order: 'asc' });
+    assert.deepEqual(sortAndOrder({ sort: ' ', order: ' ' }), { sort: 'issued', order: 'desc' });
+    assert.equal(parseListQuery({ q: '', search: 'lee' }).q, 'lee');
+    assert.equal(parseListQuery({ status: '' }).status, 'all');
+    assert.deepEqual((({ page, pageSize }) => ({ page, pageSize }))(parseListQuery({ page: '', pageSize: ' ', limit: '7' })), { page: 1, pageSize: 7 });
   });
 
   it('rejects values it does not understand', () => {
     for (const query of [
       { sort: 'tenant_id' },
+      // near misses of real names are not guessed at
+      { sort: 'issued!!!' },
+      { sort: 'l-e-a-r-n-e-r' },
+      { sort: 'learner name' },
+      { sort: 'serial__number' },
+      { sort: '--issued' },
       { order: 'sideways' },
       { status: 'deleted' },
       { page: '0' },
       { page: '1.5' },
+      { page: '1000001' },
+      { page: '99999999999999999999' },
       { pageSize: '101' },
       { pageSize: '-1' },
       { q: 'x'.repeat(101) },
@@ -276,8 +302,33 @@ describe('database layer', () => {
     assert.equal(db.inTransaction, false);
   });
 
-  it('exposes TransactionAbortedError for fatal mid-transaction failures', () => {
-    assert.ok(new TransactionAbortedError(new Error('disk full')) instanceof Error);
+  it('reports a transaction that SQLite ended behind a savepoint as aborted, not as an ordinary failure', () => {
+    // SQLite rolls the WHOLE transaction back on some errors (disk full, out of memory). Played
+    // here by ending the transaction inside the nested unit of work: its savepoint is then gone,
+    // and the caller must not carry on as if only that unit had failed.
+    const before = tenantCount();
+    for (const innerFails of [true, false]) {
+      let reachedAfterNested = false;
+      assert.throws(
+        () =>
+          db.transaction(() => {
+            addTenant('Outer');
+            db.transaction(() => {
+              addTenant('Inner');
+              db.exec('ROLLBACK');
+              if (innerFails) throw new Error('disk full');
+            });
+            reachedAfterNested = true;
+          }),
+        (err) => err instanceof TransactionAbortedError && err instanceof Error && (!innerFails || /disk full/.test(err.message)),
+      );
+      assert.equal(reachedAfterNested, false);
+      assert.equal(db.inTransaction, false);
+      assert.equal(tenantCount(), before, 'nothing of the aborted transaction survives');
+    }
+    // The connection is fully usable afterwards.
+    db.transaction(() => addTenant('AfterAbort'));
+    db.run("DELETE FROM tenants WHERE name = 'AfterAbort'");
   });
 
   it('takes the write lock without blocking the event loop while another connection holds it', async () => {
@@ -330,6 +381,93 @@ describe('database layer', () => {
       assert.equal(db.get('PRAGMA busy_timeout').timeout, regularTimeout, 'the regular busy timeout is back in place');
       assert.equal(await db.writeTransaction(() => tenantCount()), before, 'and the next write goes through');
     } finally {
+      other.close();
+    }
+  });
+
+  it('a waiting write can be answered by what another connection committed meanwhile', async () => {
+    const other = openDatabase(path.join(dir, 'unit.sqlite'));
+    try {
+      const before = tenantCount();
+      other.exec('BEGIN IMMEDIATE');
+
+      // Answer known on the third look: the wait ends there, the callback never runs, and the
+      // lock holder is not waited for.
+      let looks = 0;
+      let ran = false;
+      const started = performance.now();
+      const result = await db.writeTransaction(
+        () => {
+          ran = true;
+          addTenant('NotNeeded');
+        },
+        { timeoutMs: 30_000, whileWaiting: () => ((looks += 1) >= 3 ? { answeredBy: 'someone else' } : undefined) },
+      );
+      assert.deepEqual(result, { answeredBy: 'someone else' });
+      assert.equal(looks, 3);
+      assert.equal(ran, false);
+      assert.ok(performance.now() - started < 5_000);
+      assert.equal(db.inTransaction, false);
+
+      // null, 0 and false are answers too; only undefined means "keep waiting".
+      assert.equal(await db.writeTransaction(() => 'ran', { timeoutMs: 30_000, whileWaiting: () => null }), null);
+      assert.equal(await db.writeTransaction(() => 'ran', { timeoutMs: 30_000, whileWaiting: () => false }), false);
+
+      // An error thrown while looking is the outcome as well (a conflict that became visible).
+      await assert.rejects(
+        db.writeTransaction(() => 'ran', {
+          timeoutMs: 30_000,
+          whileWaiting: () => {
+            throw new Error('conflict found while waiting');
+          },
+        }),
+        /conflict found while waiting/,
+      );
+
+      // Without an answer the wait ends as usual - after one last look at the deadline.
+      looks = 0;
+      await assert.rejects(
+        db.writeTransaction(() => 'ran', { timeoutMs: 120, whileWaiting: () => void (looks += 1) }),
+        (err) => isBusyError(err),
+      );
+      assert.ok(looks >= 2, `looked ${looks} times`);
+      const looksAtDeadline = looks;
+      await assert.rejects(db.writeTransaction(() => 'ran', { timeoutMs: 0, whileWaiting: () => void (looks += 1) }), (err) => isBusyError(err));
+      assert.equal(looks, looksAtDeadline + 1, 'even a zero wait looks once before giving up');
+
+      other.exec('ROLLBACK');
+      // With the lock free the callback runs and whileWaiting is never consulted.
+      looks = 0;
+      assert.equal(await db.writeTransaction(() => 'ran', { whileWaiting: () => void (looks += 1) }), 'ran');
+      assert.equal(looks, 0);
+      assert.equal(tenantCount(), before);
+    } finally {
+      other.close();
+    }
+  });
+
+  it('measures the lock wait in elapsed time, whatever happens to the system clock', async () => {
+    const other = openDatabase(path.join(dir, 'unit.sqlite'));
+    const realNow = Date.now;
+    try {
+      other.exec('BEGIN IMMEDIATE');
+      for (const jumpMs of [3_600_000, -3_600_000]) {
+        const started = performance.now();
+        const attempt = db.writeTransaction(() => 'ran', { timeoutMs: 300 });
+        attempt.catch(() => {}); // asserted on below
+        setTimeout(() => {
+          Date.now = () => realNow() + jumpMs; // somebody sets the clock an hour forward / back
+        }, 60);
+        const gaveUp = !(await stillPending(attempt, 3_000));
+        Date.now = realNow;
+        const waited = performance.now() - started;
+        assert.equal(gaveUp, true, `clock jump of ${jumpMs} ms: still waiting after ${Math.round(waited)} ms`);
+        await assert.rejects(attempt, (err) => isBusyError(err));
+        assert.ok(waited >= 280, `clock jump of ${jumpMs} ms: gave up after only ${Math.round(waited)} ms`);
+      }
+      other.exec('ROLLBACK');
+    } finally {
+      Date.now = realNow;
       other.close();
     }
   });
@@ -401,6 +539,26 @@ describe('database layer', () => {
     assert.throws(() => enableWal(refused, { timeoutMs: 50 }), /WAL journaling.*"delete"/);
   });
 
+  it('opening a new file while another process writes to it waits for the WAL switch instead of failing', async () => {
+    // The real thing, deterministically: a second process has created the file, has not switched
+    // it to WAL yet and holds the write lock. In that state SQLite refuses the journal-mode
+    // switch at once ("database is locked") - the busy timeout does not apply to it.
+    const file = path.join(dir, 'contended-new-file.sqlite');
+    const holdMs = 400;
+    const holder = await holdRollbackJournalLock(file, holdMs);
+    const started = performance.now();
+    const opened = openDatabase(file); // blocks until the other process lets go
+    const waited = performance.now() - started;
+    try {
+      assert.equal(opened.get('PRAGMA journal_mode').journal_mode, 'wal');
+      assert.ok(waited >= holdMs / 4, `the open really had to wait (${Math.round(waited)} ms)`);
+      assert.equal(await holder.exited, 0);
+      assert.equal(opened.get("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'filler'").n, 1, "the other process's work is intact");
+    } finally {
+      opened.close();
+    }
+  });
+
   it('tells busy errors apart from everything else', () => {
     assert.equal(isBusyError(new Error('UNIQUE constraint failed: tenants.name')), false);
     assert.equal(isBusyError(null), false);
@@ -425,8 +583,10 @@ describe('database layer', () => {
       assert.throws(
         () =>
           db.run(
-            `INSERT INTO certificates (tenant_id, course_id, learner_id, serial_number, learner_name, course_title, issued_at, issued_local_date)
-             VALUES (@tenantId, @courseId, @learnerId, 'X-1', 'Jordan Smith', 'Safety 101', '2026-01-01T00:00:00.000Z', '2026-01-01')`,
+            `INSERT INTO certificates (tenant_id, course_id, learner_id, serial_number, learner_name, course_title,
+                                       learner_name_key, course_title_key, issued_at, issued_local_date)
+             VALUES (@tenantId, @courseId, @learnerId, 'X-1', 'Jordan Smith', 'Safety 101',
+                     'jordan smith', 'safety 101', '2026-01-01T00:00:00.000Z', '2026-01-01')`,
             { tenantId, courseId: eastCourse, learnerId: westLearner },
           ),
         /FOREIGN KEY/i,
@@ -454,19 +614,30 @@ describe('database layer', () => {
          VALUES (@tenantId, @adminId, @courseId, 'hash', 'running', '2026-01-01T00:00:00.000Z')`,
         { tenantId, adminId, courseId },
       ).lastInsertRowid;
-    const insertCertificate = ({ enrollmentId = null, operationId = null }) =>
+    const insertCertificate = ({ enrollmentId = null, operationId = null, issuedBy = null, revokedBy = null }) =>
       db.run(
         `INSERT INTO certificates (tenant_id, course_id, learner_id, enrollment_id, bulk_operation_id, serial_number,
-                                   learner_name, course_title, issued_at, issued_local_date)
+                                   learner_name, course_title, learner_name_key, course_title_key, issued_at, issued_local_date,
+                                   issued_by_admin_id, status, revoked_at, revoked_by_admin_id)
          VALUES (1, @courseId, @learnerId, @enrollmentId, @operationId, 'X-2', 'Priya Sharma', 'Safety 101',
-                 '2026-01-01T00:00:00.000Z', '2026-01-01')`,
-        { courseId: east.courseId, learnerId: east.learnerId, enrollmentId, operationId },
+                 'priya sharma', 'safety 101', '2026-01-01T00:00:00.000Z', '2026-01-01',
+                 @issuedBy, @status, @revokedAt, @revokedBy)`,
+        {
+          courseId: east.courseId,
+          learnerId: east.learnerId,
+          enrollmentId,
+          operationId,
+          issuedBy,
+          status: revokedBy === null ? 'active' : 'revoked',
+          revokedAt: revokedBy === null ? null : '2026-01-02T00:00:00.000Z',
+          revokedBy,
+        },
       ).lastInsertRowid;
-    const insertAuditEvent = ({ certificateId, operationId = null }) =>
+    const insertAuditEvent = ({ certificateId, operationId = null, adminId = eastAdmin }) =>
       db.run(
         `INSERT INTO audit_events (tenant_id, actor_admin_id, actor_email, action, certificate_id, bulk_operation_id, created_at)
          VALUES (1, @adminId, 'alice@east.test', 'certificate.issued', @certificateId, @operationId, '2026-01-01T00:00:00.000Z')`,
-        { adminId: eastAdmin, certificateId, operationId },
+        { adminId, certificateId, operationId },
       );
 
     class Undo extends Error {}
@@ -480,12 +651,24 @@ describe('database layer', () => {
           assert.throws(() => insertCertificate({ operationId: westOperation }), /FOREIGN KEY/i);
           assert.throws(() => insertAuditEvent({ certificateId: westCertificate }), /FOREIGN KEY/i);
           assert.throws(() => insertAuditEvent({ certificateId: eastCertificate, operationId: westOperation }), /FOREIGN KEY/i);
+          // ...and so are the references to people and courses: an East row cannot name a West admin
+          // as its actor, issuer or revoker, and an East operation cannot run on a West course.
+          assert.throws(() => insertOperation(1, west.adminId, east.courseId), /FOREIGN KEY/i);
+          assert.throws(() => insertOperation(1, eastAdmin, west.courseId), /FOREIGN KEY/i);
+          assert.throws(() => insertCertificate({ issuedBy: west.adminId }), /FOREIGN KEY/i);
+          assert.throws(() => insertCertificate({ issuedBy: eastAdmin, revokedBy: west.adminId }), /FOREIGN KEY/i);
+          assert.throws(() => insertAuditEvent({ certificateId: eastCertificate, adminId: west.adminId }), /FOREIGN KEY/i);
           // moving a row to the other tenant is refused just the same
           assert.throws(() => db.run('UPDATE certificates SET tenant_id = 2 WHERE id = @id', { id: eastCertificate }), /FOREIGN KEY/i);
           assert.throws(() => db.run('UPDATE audit_events SET tenant_id = 2 WHERE certificate_id = @id', { id: eastCertificate }), /FOREIGN KEY/i);
 
           // The same statements pointing at rows of the right tenant are accepted.
-          const certificateId = insertCertificate({ enrollmentId: east.enrollmentId, operationId: eastOperation });
+          const certificateId = insertCertificate({
+            enrollmentId: east.enrollmentId,
+            operationId: eastOperation,
+            issuedBy: eastAdmin,
+            revokedBy: eastAdmin,
+          });
           insertAuditEvent({ certificateId, operationId: eastOperation });
           throw new Undo();
         }),
@@ -532,13 +715,24 @@ describe('database layer', () => {
     assert.equal(count(), before);
   });
 
+  it('refuses learners without a name (a certificate could never be issued to them)', () => {
+    for (const name of ['', '   ']) {
+      assert.throws(
+        () => db.run("INSERT INTO learners (tenant_id, full_name, created_at) VALUES (1, @name, '2026-01-01T00:00:00.000Z')", { name }),
+        /CHECK/i,
+      );
+    }
+  });
+
   it('allows at most one certificate per learner and course', () => {
     const existing = db.get('SELECT tenant_id, course_id, learner_id FROM certificates WHERE id = 1');
     assert.throws(
       () =>
         db.run(
-          `INSERT INTO certificates (tenant_id, course_id, learner_id, serial_number, learner_name, course_title, issued_at, issued_local_date)
-           VALUES (@tenant_id, @course_id, @learner_id, 'DUP-1', 'Alex Lee', 'Safety 101', '2026-01-01T00:00:00.000Z', '2026-01-01')`,
+          `INSERT INTO certificates (tenant_id, course_id, learner_id, serial_number, learner_name, course_title,
+                                     learner_name_key, course_title_key, issued_at, issued_local_date)
+           VALUES (@tenant_id, @course_id, @learner_id, 'DUP-1', 'Alex Lee', 'Safety 101',
+                   'alex lee', 'safety 101', '2026-01-01T00:00:00.000Z', '2026-01-01')`,
           { tenant_id: existing.tenant_id, course_id: existing.course_id, learner_id: existing.learner_id },
         ),
       /UNIQUE/i,
@@ -597,5 +791,227 @@ describe('database layer', () => {
               <> (c.status = 'revoked')`,
     );
     assert.deepEqual(mismatches, []);
+  });
+});
+
+describe('text folding for search and sort', () => {
+  it('ignores case and accents', () => {
+    assert.equal(foldText('José Álvarez'), 'jose alvarez');
+    assert.equal(foldText('JOSÉ ÁLVAREZ'), 'jose alvarez');
+    assert.equal(foldText('jose alvarez'), 'jose alvarez');
+    assert.equal(foldText('Zoë Brontë-Müller'), 'zoe bronte-muller');
+    assert.equal(foldText('Ngô Thị Ánh Tuyết'), 'ngo thi anh tuyet');
+    assert.equal(foldText("O'Connor"), "o'connor");
+    assert.equal(foldText('EAST-0000001'), 'east-0000001');
+  });
+
+  it('unifies the different ways of writing the same text', () => {
+    assert.equal(foldText('Jose\u0301'), foldText('Jos\u00e9'), 'combining accent vs precomposed letter');
+    assert.equal(foldText('Ｊｏｓｅ　Ｌｅｅ'), 'jose lee', 'full-width forms');
+    assert.equal(foldText('Alex\u00a0Lee'), 'alex lee', 'non-breaking space');
+    assert.equal(foldText('ﬁona'), 'fiona', 'ligatures');
+    assert.equal(foldText('İstanbul'), 'istanbul');
+    assert.equal(foldText('ΟΔΥΣΣΕΥΣ'), foldText('οδυσσευς'), 'both lower-case sigmas');
+    assert.ok(foldText('ΟΔΥΣΣΕΥΣ').includes(foldText('ΥΣΣ')), 'a fragment cut out of an upper-case word still matches');
+  });
+
+  it('leaves alone what is not an accent on a letter', () => {
+    assert.equal(foldText('李雷'), '李雷');
+    assert.equal(foldText('Søren Łukasz'), 'søren łukasz', 'letters of their own, not accented o and l');
+    assert.equal(foldText('한글'), '한글', 'Hangul stays composed');
+    assert.equal(foldText('की'), 'की', 'vowel signs of other scripts are kept');
+    assert.equal(foldText('😀 100%_\\'), '😀 100%_\\');
+    assert.equal(foldText('\u0301\u0300'), '', 'accents on nothing fold to nothing');
+    assert.equal(foldText(''), '');
+  });
+
+  it('agrees with an independently written reference on ordinary names', () => {
+    for (const name of ['José Álvarez', 'Zoë', 'Élodie Durand', 'ÅSA Öberg', 'Nguyễn Văn A', "Marcus O'Connor", 'alex lee', 'ALEX LEE']) {
+      assert.equal(foldText(name), referenceFold(name), name);
+    }
+  });
+
+  it('is stable: folding twice changes nothing', () => {
+    for (const name of ['José Álvarez', 'ΟΔΥΣΣΕΥΣ', 'Ｊｏｓｅ', 'İstanbul', 'ﬁona', '한글', 'Straße']) {
+      assert.equal(foldText(foldText(name)), foldText(name), name);
+    }
+  });
+});
+
+describe('limiter (concurrent exports)', () => {
+  it('admits up to the limit and the rest in arrival order', async () => {
+    const limiter = createLimiter(2);
+    const releaseA = await limiter.acquire();
+    const releaseB = await limiter.acquire();
+    assert.deepEqual([limiter.active, limiter.waiting], [2, 0]);
+
+    const order = [];
+    const c = limiter.acquire().then((release) => (order.push('c'), release));
+    const d = limiter.acquire().then((release) => (order.push('d'), release));
+    assert.equal(await stillPending(Promise.race([c, d]), 30), true, 'nobody is admitted beyond the limit');
+    assert.deepEqual([limiter.active, limiter.waiting], [2, 2]);
+
+    releaseA();
+    const releaseC = await c;
+    assert.deepEqual(order, ['c']);
+    assert.equal(await stillPending(d, 30), true);
+    releaseA(); // releasing twice does not free a second slot
+    assert.equal(await stillPending(d, 30), true);
+    assert.deepEqual([limiter.active, limiter.waiting], [2, 1]);
+
+    releaseB();
+    const releaseD = await d;
+    assert.deepEqual(order, ['c', 'd']);
+    releaseC();
+    releaseD();
+    assert.deepEqual([limiter.active, limiter.waiting], [0, 0]);
+  });
+
+  it('a caller that gives up while waiting leaves the queue without taking a slot', async () => {
+    const limiter = createLimiter(1);
+    const release = await limiter.acquire();
+    const impatient = new AbortController();
+    const abandoned = limiter.acquire({ signal: impatient.signal });
+    const patient = limiter.acquire();
+    assert.equal(limiter.waiting, 2);
+
+    impatient.abort(new Error('client went away'));
+    await assert.rejects(abandoned, /client went away/);
+    assert.equal(limiter.waiting, 1);
+
+    release();
+    const next = await patient;
+    assert.deepEqual([limiter.active, limiter.waiting], [1, 0]);
+    next();
+
+    const alreadyGone = new AbortController();
+    alreadyGone.abort(new Error('never mind'));
+    await assert.rejects(limiter.acquire({ signal: alreadyGone.signal }), /never mind/);
+    assert.equal(limiter.active, 0);
+  });
+
+  it('turns callers away once the queue is full', async () => {
+    const limiter = createLimiter(1, { maxWaiting: 2 });
+    const release = await limiter.acquire();
+    const waiting = [limiter.acquire(), limiter.acquire()];
+    await assert.rejects(limiter.acquire(), LimiterFullError);
+    assert.equal(limiter.waiting, 2);
+    release();
+    (await waiting[0])();
+    (await waiting[1])();
+    assert.deepEqual([limiter.active, limiter.waiting], [0, 0]);
+    assert.throws(() => createLimiter(0), RangeError);
+  });
+});
+
+describe('settings', () => {
+  it('have sensible defaults', () => {
+    const config = loadConfig({});
+    assert.deepEqual(
+      [config.port, config.host, config.logRequests, config.maxConcurrentExports, config.exportIdleTimeoutMs],
+      [3000, undefined, true, 4, 30_000],
+    );
+    assert.equal(loadConfig({ PORT: '', EXPORT_MAX_CONCURRENT: ' ', EXPORT_IDLE_TIMEOUT_MS: '' }).port, 3000, 'blank means unset');
+    assert.equal(loadConfig({ EXPORT_IDLE_TIMEOUT_MS: '0' }).exportIdleTimeoutMs, 0, '0 switches the timeout off');
+  });
+
+  it('rejects unusable values in one line each', () => {
+    for (const [name, value] of [
+      ['PORT', 'eighty'],
+      ['PORT', '70000'],
+      ['PORT', '-1'],
+      ['EXPORT_MAX_CONCURRENT', '0'],
+      ['EXPORT_MAX_CONCURRENT', '2.5'],
+      ['EXPORT_MAX_CONCURRENT', 'many'],
+      ['EXPORT_IDLE_TIMEOUT_MS', '-5'],
+      ['EXPORT_IDLE_TIMEOUT_MS', 'soon'],
+    ]) {
+      assert.throws(
+        () => loadConfig({ [name]: value }),
+        (err) => err.message.startsWith(`${name} must be an integer between `) && err.message.includes(`"${value}"`) && !err.message.includes('\n'),
+        `${name}=${value}`,
+      );
+    }
+  });
+});
+
+describe('load-test generator', () => {
+  it('numbers its certificates in a range of their own', () => {
+    assert.equal(formatGeneratedSerial('EAST', 1), 'EAST-LT-0000001');
+    assert.equal(formatGeneratedSerial('EAST', 2_000_000), 'EAST-LT-2000000');
+  });
+});
+
+describe('export stream', () => {
+  const actor = { tenantId: 1, timezone: 'Australia/Sydney' };
+  const row = (name, matches) => ({ learner_name: name, course_title: 'Course', serial_number: `S-${name}`, issued_at: '2026-01-10T13:30:00.000Z', matches });
+
+  /** A stand-in for the dedicated reader connection that records what the export does with it. */
+  function fakeReader(rows) {
+    const reader = {
+      statements: [],
+      fetched: 0,
+      iteratorReturned: false,
+      exec: (sql) => reader.statements.push(sql),
+      iterate() {
+        let i = 0;
+        return {
+          next() {
+            if (i >= rows.length) return { done: true, value: undefined };
+            reader.fetched += 1;
+            return { done: false, value: rows[i++] };
+          },
+          return() {
+            reader.iteratorReturned = true;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
+    return reader;
+  }
+
+  it('keeps the filter out of WHERE, so that no single step depends on how many rows match', () => {
+    const filtered = buildExportPlan(actor, parseListQuery({ q: 'Lee', status: 'active', sort: 'learner' }, { paginate: false }));
+    assert.equal(filtered.filtered, true);
+    assert.match(filtered.sql, /AS matches/);
+    assert.match(filtered.sql, /WHERE c\.tenant_id = @tenantId\s+ORDER BY/);
+    assert.deepEqual(filtered.params, { tenantId: 1, needle: 'lee', serialPattern: '%lee%', status: 'active' });
+
+    const everything = buildExportPlan(actor, parseListQuery({}, { paginate: false }));
+    assert.equal(everything.filtered, false);
+    assert.doesNotMatch(everything.sql, /matches/);
+    assert.deepEqual(everything.params, { tenantId: 1 });
+  });
+
+  it('looks at a fixed number of rows per step, whether they match or not', async () => {
+    const rows = Array.from({ length: 1_050 }, (_, i) => row(`n${i}`, i === 7 || i === 1_049 ? 1 : 0));
+    const reader = fakeReader(rows);
+    const plan = { sql: 'SELECT ...', params: {}, filtered: true, timeZone: 'Australia/Sydney', header: ['H'] };
+    const stream = streamCsvExport(reader, plan, { batchRows: 100 });
+
+    const first = await stream.next();
+    assert.equal(first.value, 'H\nn7,Course,S-n7,2026-01-11 00:30\n', 'the header travels with the first step');
+    assert.equal(reader.fetched, 100, 'the first step stopped after 100 rows although only one matched');
+
+    const second = await stream.next();
+    assert.equal(second.value, 'n1049,Course,S-n1049,2026-01-11 00:30\n');
+    assert.equal(reader.fetched, 1_050, 'steps without a match produce no chunk; the next match ends the wait');
+    assert.deepEqual(await stream.next(), { done: true, value: undefined });
+    assert.deepEqual(reader.statements, ['BEGIN', 'ROLLBACK'], 'one read transaction, closed at the end');
+    assert.equal(reader.iteratorReturned, true);
+  });
+
+  it('includes every row when there is no filter, and releases the snapshot when abandoned mid-way', async () => {
+    const rows = Array.from({ length: 250 }, (_, i) => row(`n${i}`, undefined));
+    const reader = fakeReader(rows);
+    const plan = { sql: 'SELECT ...', params: {}, filtered: false, timeZone: 'Australia/Sydney', header: ['H'] };
+    const stream = streamCsvExport(reader, plan, { batchRows: 100 });
+    const first = await stream.next();
+    assert.equal(first.value.split('\n').length - 1, 101, 'header + 100 rows');
+    await stream.return(undefined); // the client went away
+    assert.deepEqual(reader.statements, ['BEGIN', 'ROLLBACK']);
+    assert.equal(reader.iteratorReturned, true);
+    assert.equal(reader.fetched, 100, 'nothing more was read');
   });
 });

@@ -9,45 +9,63 @@
  *
  * Safe to run while the server is up: the rows are written in one transaction and the running
  * app shows them on the next request. The quick-start demo rows are never modified.
+ *
+ * Every problem ends in a short message (no stack trace) and exit code 1; nothing is written then.
  */
 import { parseArgs } from 'node:util';
 
 import { openInitializedDatabase } from '../src/bootstrap.js';
 import { loadConfig, resolveUserPath } from '../src/config.js';
 import { clearGeneratedCertificates, generateCertificates } from '../src/db/generate.js';
+import { checkDatabaseSettings } from '../src/db/sqlite.js';
 
-const { values } = parseArgs({
-  options: {
-    tenant: { type: 'string', default: 'East' },
-    count: { type: 'string', default: '100000' },
-    seed: { type: 'string', default: '20260110' },
-    db: { type: 'string' },
-    clear: { type: 'boolean', default: false },
-    help: { type: 'boolean', short: 'h', default: false },
-  },
-  allowPositionals: false,
-});
+const USAGE = 'Usage: node scripts/generate-certificates.js [--tenant East] [--count 100000] [--seed N] [--db path] [--clear]';
+
+function fail(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+let values;
+try {
+  ({ values } = parseArgs({
+    options: {
+      tenant: { type: 'string', default: 'East' },
+      count: { type: 'string', default: '100000' },
+      seed: { type: 'string', default: '20260110' },
+      db: { type: 'string' },
+      clear: { type: 'boolean', default: false },
+      help: { type: 'boolean', short: 'h', default: false },
+    },
+    allowPositionals: false,
+  }));
+} catch (err) {
+  fail(`${err.message}\n${USAGE}`);
+}
 
 if (values.help) {
-  console.log(
-    'Usage: node scripts/generate-certificates.js [--tenant East] [--count 100000] [--seed N] [--db path] [--clear]',
-  );
+  console.log(USAGE);
   process.exit(0);
 }
 
 const count = Number(values.count);
 const seed = Number(values.seed);
-if (!Number.isInteger(count) || count < 1) {
-  console.error(`--count must be a positive integer (got "${values.count}")`);
-  process.exit(1);
-}
-if (!Number.isInteger(seed)) {
-  console.error(`--seed must be an integer (got "${values.seed}")`);
-  process.exit(1);
-}
+if (!Number.isInteger(count) || count < 1) fail(`--count must be a positive integer (got "${values.count}")`);
+if (!Number.isInteger(seed)) fail(`--seed must be an integer (got "${values.seed}")`);
 
-const dbPath = values.db ? resolveUserPath(values.db) : loadConfig().dbPath;
-const db = openInitializedDatabase(dbPath, { log: console.log });
+let dbPath;
+let db;
+try {
+  checkDatabaseSettings(); // SQLITE_DRIVER, DB_BUSY_TIMEOUT_MS
+  dbPath = values.db ? resolveUserPath(values.db) : loadConfig().dbPath;
+} catch (err) {
+  fail(err.message);
+}
+try {
+  db = openInitializedDatabase(dbPath, { log: console.log });
+} catch (err) {
+  fail(`Could not open the database at ${dbPath}: ${err.message}`);
+}
 try {
   const started = performance.now();
   if (values.clear) {

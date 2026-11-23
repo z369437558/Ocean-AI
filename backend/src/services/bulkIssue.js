@@ -10,6 +10,10 @@
  * key, every later one finds that row and replays the stored response byte for byte. There is no
  * observable "in progress" state and therefore no window in which a duplicate could slip through.
  *
+ * Waiting for the write lock never blocks the process (see Connection.writeTransaction), and a
+ * request that waits keeps looking for the stored response: once an identical request has
+ * committed anywhere, every caller gets that same answer without further delay.
+ *
  * A crash before COMMIT leaves nothing behind (no certificates, no audit events, no key), so the
  * client's retry simply runs the operation for the first time.
  *
@@ -47,10 +51,14 @@ function parseCourseId(body) {
   return courseId;
 }
 
-function failureMessage(err) {
-  const text = String(err?.message ?? err).replace(/\s+/g, ' ').trim();
-  return `Certificate could not be issued: ${text.slice(0, 200) || 'unexpected error'}`;
-}
+/**
+ * What the admin is told about a learner whose certificate could not be issued. The cause is an
+ * internal error (it goes to the server log with the operation and learner id); its raw text -
+ * constraint names, SQL - does not belong in an API response.
+ */
+const FAILURE_MESSAGE =
+  'The certificate could not be issued because of an unexpected error. Nothing was saved for this learner; ' +
+  'the server log has the details. Other learners are not affected.';
 
 /**
  * What an earlier request with this key left behind, if anything: its stored response when the
@@ -104,6 +112,11 @@ export async function bulkIssue(db, actor, { body, idempotencyKey }, { now = () 
   // Obviously invalid requests are turned away before queueing for the write lock as well.
   if (!findCourse(db, actor, parseCourseId(body))) throw notFound('Course');
 
+  // While this request queues for the write lock, an identical one may complete elsewhere (another
+  // server on the same file). From that moment the answer is known and is given straight away -
+  // the same 201 the other caller got - even if the lock stays taken for longer than the wait.
+  const whileWaiting = () => answerFromStoredKey(db, actor, idempotencyKey, requestHash) ?? undefined;
+
   return db.writeTransaction(() => {
     // 1. The decisive idempotency check, now under the write lock: an identical request that was
     //    racing this one has either not started (we execute) or has committed (we replay).
@@ -154,10 +167,11 @@ export async function bulkIssue(db, actor, { body, idempotencyKey }, { now = () 
       try {
         // Each learner gets a SAVEPOINT: if issuing fails for one of them, only that learner's
         // partial writes are undone and reported as "failed"; everyone else is unaffected.
+        // (`hooks` are test seams: they let a test make issuing fail before or after the writes.)
         const certificate = db.transaction(() => {
           const learner = { id: row.learner_id, name: row.learner_name };
           hooks.beforeIssue?.({ learner, course, tenant });
-          return issueCertificate(db, {
+          const issued = issueCertificate(db, {
             tenant,
             actor,
             course,
@@ -167,6 +181,8 @@ export async function bulkIssue(db, actor, { body, idempotencyKey }, { now = () 
             bulkOperationId: operationId,
             auditDetails: { enrollmentId: row.enrollment_id, idempotencyKey },
           });
+          hooks.afterIssue?.({ learner, course, tenant, certificate: issued });
+          return issued;
         });
         summary.issued += 1;
         results.push({
@@ -181,7 +197,7 @@ export async function bulkIssue(db, actor, { body, idempotencyKey }, { now = () 
         if (err instanceof TransactionAbortedError) throw err; // nothing can be salvaged; fail the request
         logger.error(`[bulk-issue] operation ${operationId}: learner ${row.learner_id} failed:`, err);
         summary.failed += 1;
-        results.push({ ...base, outcome: 'failed', reason: 'issue_failed', message: failureMessage(err) });
+        results.push({ ...base, outcome: 'failed', reason: 'issue_failed', message: FAILURE_MESSAGE });
       }
     }
 
@@ -217,7 +233,7 @@ export async function bulkIssue(db, actor, { body, idempotencyKey }, { now = () 
     );
 
     return { status, body: responseBody, replayed: false, operationId };
-  });
+  }, { whileWaiting });
 }
 
 /** Stored result of a past operation (same JSON that the POST returned). 404 across tenants. */

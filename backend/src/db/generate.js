@@ -2,9 +2,11 @@
  * Load-test data generator: adds N certificates (100,000 by default) to one tenant.
  *
  * The quick-start rows are never touched. Generated certificates belong to their own generated
- * courses and learners (flagged `is_generated = 1`), so the demo scenario - the "Safety 101"
- * rosters, "Alex Lee", every seeded certificate - behaves exactly as before. Running the
- * generator again replaces the previous generated set instead of piling up on top of it.
+ * courses and learners (flagged `is_generated = 1`) and are numbered in their own serial range
+ * (EAST-LT-0000001, ...), so the demo scenario - the "Safety 101" rosters, "Alex Lee", every seeded
+ * certificate, the tenant's serial counter - is exactly as before, and the next certificate issued
+ * through the app still gets the serial number it would have got without the load-test data.
+ * Running the generator again replaces the previous generated set instead of piling up on top of it.
  *
  * The data is deliberately full of equal sort keys, because that is what makes ordering bugs
  * visible: about 2,500 distinct learner names shared by 10,000 learners, 10 course titles, and
@@ -13,8 +15,9 @@
  *
  * Everything is derived from a seeded PRNG, so the same arguments always produce the same rows.
  */
+import { foldText } from '../lib/text.js';
 import { localDate } from '../lib/time.js';
-import { AUDIT_ACTIONS, formatSerial, reserveSerials } from '../services/ledger.js';
+import { AUDIT_ACTIONS } from '../services/ledger.js';
 
 const FIRST_NAMES = [
   'Aaliyah', 'Aiden', 'Amelia', 'Anika', 'Arjun', 'Ava', 'Ben', 'Caleb', 'Charlotte', 'Chloe',
@@ -58,6 +61,11 @@ function createRandom(seed) {
 }
 
 const gcd = (a, b) => (b === 0 ? a : gcd(b, a % b));
+
+/** Serial numbers of generated certificates: a range of their own, restarted with every run. */
+export function formatGeneratedSerial(tenantCode, sequence) {
+  return `${tenantCode}-LT-${String(sequence).padStart(7, '0')}`;
+}
 
 function findTenant(db, tenantName) {
   const tenant = db.get('SELECT id, name, code, timezone FROM tenants WHERE name = @name COLLATE NOCASE', {
@@ -109,6 +117,7 @@ export function generateCertificates(db, { tenantName, count = 100_000, seed = 2
     // Courses and learners -----------------------------------------------------------------
     const courses = COURSE_TITLES.map((title) => ({
       title,
+      titleKey: foldText(title),
       id: db.run(
         'INSERT INTO courses (tenant_id, title, is_generated, created_at) VALUES (@tenantId, @title, 1, @createdAt)',
         { tenantId: tenant.id, title, createdAt },
@@ -121,6 +130,7 @@ export function generateCertificates(db, { tenantName, count = 100_000, seed = 2
       const name = `${FIRST_NAMES[Math.floor(random() * FIRST_NAMES.length)]} ${LAST_NAMES[Math.floor(random() * LAST_NAMES.length)]}`;
       learners[i] = {
         name,
+        nameKey: foldText(name),
         id: db.run(
           `INSERT INTO learners (tenant_id, full_name, email, is_generated, created_at)
            VALUES (@tenantId, @name, @email, 1, @createdAt)`,
@@ -141,13 +151,13 @@ export function generateCertificates(db, { tenantName, count = 100_000, seed = 2
     let stride = 7919;
     while (gcd(stride, count) !== 1) stride += 2;
 
-    const firstSerial = reserveSerials(db, tenant.id, count);
     let revokedCount = 0;
     let previousBatch = -1;
     let issuedAt = '';
     let issuedLocalDate = '';
 
     // Rows are inserted in chronological order, so ids and serial numbers follow the timeline.
+    // (deleteGenerated above removed the previous set, so the numbering can start at 1 again.)
     for (let k = 0; k < count; k += 1) {
       const batch = Math.min(batchCount - 1, Math.floor((k * batchCount) / count));
       if (batch !== previousBatch) {
@@ -158,7 +168,7 @@ export function generateCertificates(db, { tenantName, count = 100_000, seed = 2
       const pair = (k * stride) % count;
       const learner = learners[Math.floor(pair / courses.length)];
       const course = courses[pair % courses.length];
-      const serialNumber = formatSerial(tenant.code, firstSerial + k);
+      const serialNumber = formatGeneratedSerial(tenant.code, k + 1);
 
       const enrollmentId = db.run(
         `INSERT INTO enrollments (tenant_id, course_id, learner_id, status, completed_at, created_at)
@@ -178,9 +188,11 @@ export function generateCertificates(db, { tenantName, count = 100_000, seed = 2
 
       const certificateId = db.run(
         `INSERT INTO certificates (tenant_id, course_id, learner_id, enrollment_id, serial_number, learner_name, course_title,
+                                   learner_name_key, course_title_key,
                                    status, issued_at, issued_local_date, issued_by_admin_id,
                                    revoked_at, revoked_by_admin_id, revocation_reason)
          VALUES (@tenantId, @courseId, @learnerId, @enrollmentId, @serialNumber, @learnerName, @courseTitle,
+                 @learnerNameKey, @courseTitleKey,
                  @status, @issuedAt, @issuedLocalDate, @adminId,
                  @revokedAt, @revokedBy, @reason)`,
         {
@@ -191,6 +203,8 @@ export function generateCertificates(db, { tenantName, count = 100_000, seed = 2
           serialNumber,
           learnerName: learner.name,
           courseTitle: course.title,
+          learnerNameKey: learner.nameKey,
+          courseTitleKey: course.titleKey,
           status: revokedAt ? 'revoked' : 'active',
           issuedAt,
           issuedLocalDate,

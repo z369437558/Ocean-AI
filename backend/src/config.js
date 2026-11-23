@@ -15,20 +15,33 @@ export function resolveUserPath(value, env = process.env) {
   return path.resolve(env.INIT_CWD || process.cwd(), value);
 }
 
+function integerSetting(env, name, { fallback, min, max }) {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max} (got "${raw}")`);
+  }
+  return value;
+}
+
 /**
- * Runtime configuration, all optional: PORT, HOST, DB_PATH, STATIC_DIR, LOG_REQUESTS.
- * (The database layer reads two more settings itself: SQLITE_DRIVER and DB_BUSY_TIMEOUT_MS.)
+ * Runtime configuration, all optional: PORT, HOST, DB_PATH, STATIC_DIR, LOG_REQUESTS,
+ * EXPORT_MAX_CONCURRENT, EXPORT_IDLE_TIMEOUT_MS. Throws an Error with a one-line message for a
+ * value that cannot be used.
+ * (The database layer reads two more settings itself: SQLITE_DRIVER and DB_BUSY_TIMEOUT_MS; see
+ * checkDatabaseSettings in db/sqlite.js.)
  */
 export function loadConfig(env = process.env) {
-  const port = env.PORT === undefined || env.PORT === '' ? 3000 : Number(env.PORT);
-  if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    throw new Error(`PORT must be an integer between 0 and 65535 (got "${env.PORT}")`);
-  }
   return {
-    port,
+    port: integerSetting(env, 'PORT', { fallback: 3000, min: 0, max: 65535 }),
     host: env.HOST || undefined, // undefined = all interfaces
     dbPath: env.DB_PATH ? resolveUserPath(env.DB_PATH, env) : DEFAULT_DB_PATH,
     staticDir: env.STATIC_DIR ? resolveUserPath(env.STATIC_DIR, env) : DEFAULT_STATIC_DIR,
     logRequests: env.LOG_REQUESTS !== '0',
+    // CSV exports reading at the same time; further requests wait for a free slot.
+    maxConcurrentExports: integerSetting(env, 'EXPORT_MAX_CONCURRENT', { fallback: 4, min: 1, max: 64 }),
+    // A download whose client accepts no data for this long is dropped (0 = never).
+    exportIdleTimeoutMs: integerSetting(env, 'EXPORT_IDLE_TIMEOUT_MS', { fallback: 30_000, min: 0, max: 3_600_000 }),
   };
 }

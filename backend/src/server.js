@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createApp } from './app.js';
 import { openInitializedDatabase } from './bootstrap.js';
 import { loadConfig } from './config.js';
-import { openDatabase } from './db/sqlite.js';
+import { checkDatabaseSettings, openDatabase } from './db/sqlite.js';
 import { ACTOR_HEADER, listActors } from './services/actors.js';
 
 /** Start-up problems are the operator's to fix: say what is wrong in one line, without a stack trace. */
@@ -19,6 +19,7 @@ let config;
 let db;
 try {
   config = loadConfig();
+  checkDatabaseSettings(); // SQLITE_DRIVER, DB_BUSY_TIMEOUT_MS
 } catch (err) {
   exitWith(err.message);
 }
@@ -33,6 +34,8 @@ const app = createApp({
   openReader: () => openDatabase(config.dbPath, { queryOnly: true }),
   staticDir: config.staticDir,
   logRequests: config.logRequests,
+  maxConcurrentExports: config.maxConcurrentExports,
+  exportIdleTimeoutMs: config.exportIdleTimeoutMs,
 });
 
 // The error handler is attached before listen(): with app.listen() Express would hand a failed

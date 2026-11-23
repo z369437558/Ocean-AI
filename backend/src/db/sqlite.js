@@ -29,8 +29,20 @@ function lockWaitFromEnv(raw = process.env.DB_BUSY_TIMEOUT_MS) {
   return value;
 }
 
-const LOCK_WAIT_MS = lockWaitFromEnv();
+// The two settings of this module are read when it loads, but a bad value must not make the import
+// itself fail: entry points report configuration problems in one line (checkDatabaseSettings).
+let settingsError = null;
+let LOCK_WAIT_MS = 10_000;
+try {
+  LOCK_WAIT_MS = lockWaitFromEnv();
+} catch (err) {
+  settingsError = err;
+}
+
 const WAL_SIZE_LIMIT_BYTES = 16 * 1024 * 1024;
+
+/** Elapsed-time clock for deadlines: it does not jump when the system clock is set, as the wall clock does. */
+const monotonicNow = () => performance.now();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -107,9 +119,22 @@ async function resolveDriver() {
   );
 }
 
-const driver = await resolveDriver();
+let driver = null;
+try {
+  driver = await resolveDriver();
+} catch (err) {
+  settingsError ??= err;
+}
 
-export const driverName = driver.name;
+export const driverName = driver?.name ?? null;
+
+/**
+ * Throws if SQLITE_DRIVER or DB_BUSY_TIMEOUT_MS is unusable (or no SQLite driver could be loaded).
+ * openDatabase() checks this too; entry points call it first to report the problem on its own line.
+ */
+export function checkDatabaseSettings() {
+  if (settingsError) throw settingsError;
+}
 
 /** Marks errors after which SQLite has already rolled the whole transaction back. */
 export class TransactionAbortedError extends Error {
@@ -238,25 +263,36 @@ export class Connection {
    * included - until it gets the lock. Here the lock is only ever *tried*; while it is taken, the
    * request waits asynchronously and the process keeps answering everything else. Once the lock is
    * held, `fn` runs synchronously to COMMIT exactly as in `transaction()`.
+   *
+   * `whileWaiting` (optional, synchronous) is called every time the lock turns out to be taken.
+   * If it returns anything but undefined, the wait is over and that value is the result; `fn`
+   * does not run. It is for callers whose outcome can become known through someone else's commit
+   * while they queue - an identical request served by another process, typically - so that they
+   * answer from it right away instead of waiting on, or timing out behind, an unrelated writer.
    */
-  async writeTransaction(fn, { timeoutMs = LOCK_WAIT_MS } = {}) {
-    const deadline = Date.now() + timeoutMs;
+  async writeTransaction(fn, { timeoutMs = LOCK_WAIT_MS, whileWaiting } = {}) {
+    const deadline = monotonicNow() + timeoutMs;
     let delay = 4;
     for (;;) {
       if (this.#depth !== 0) throw new Error('writeTransaction cannot start inside another transaction');
-      let wait;
+      let busy;
       this.exec('PRAGMA busy_timeout = 0'); // try once, do not sleep inside SQLite
       try {
         this.exec('BEGIN IMMEDIATE');
         break;
       } catch (err) {
-        const remaining = deadline - Date.now();
-        if (!isBusyError(err) || remaining <= 0) throw err;
-        wait = Math.min(delay, remaining); // the last attempt lands on the deadline
+        if (!isBusyError(err)) throw err;
+        busy = err;
       } finally {
         this.exec(`PRAGMA busy_timeout = ${LOCK_WAIT_MS}`);
       }
-      await sleep(wait);
+      if (whileWaiting) {
+        const settled = whileWaiting();
+        if (settled !== undefined) return settled;
+      }
+      const remaining = deadline - monotonicNow();
+      if (remaining <= 0) throw busy;
+      await sleep(Math.min(delay, remaining)); // the last attempt lands on the deadline
       delay = Math.min(delay * 2, 100);
     }
 
@@ -307,6 +343,7 @@ export class Connection {
  * `queryOnly` connections are used for exports; they cannot modify the database.
  */
 export function openDatabase(file, { queryOnly = false } = {}) {
+  checkDatabaseSettings();
   if (!file || file === ':memory:') {
     throw new Error('A database file path is required (in-memory databases are not supported)');
   }
@@ -346,16 +383,16 @@ export function openDatabase(file, { queryOnly = false } = {}) {
  * try again: as soon as one process has made the switch, it succeeds for everyone else.
  */
 export function enableWal(connection, { timeoutMs = LOCK_WAIT_MS } = {}) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = monotonicNow() + timeoutMs;
   for (let delay = 5; ; delay = Math.min(delay * 2, 100)) {
     let mode;
     try {
       mode = connection.get('PRAGMA journal_mode = WAL')?.journal_mode;
       if (mode === 'wal') return;
     } catch (err) {
-      if (!isBusyError(err) || Date.now() >= deadline) throw err;
+      if (!isBusyError(err) || monotonicNow() >= deadline) throw err;
     }
-    if (mode !== undefined && Date.now() >= deadline) {
+    if (mode !== undefined && monotonicNow() >= deadline) {
       throw new Error(`Could not switch the database to WAL journaling (journal mode is "${mode}")`);
     }
     sleepSync(delay);

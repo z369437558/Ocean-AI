@@ -14,15 +14,18 @@ import {
   ALICE,
   BOB,
   SEED,
+  assertSameRows,
   clientFor,
   createTempDir,
-  nocaseCompare,
+  foldedCompare,
   openStream,
   parseCsv,
+  referenceFold,
   removeTempDir,
   runScript,
   startServer,
   timed,
+  until,
 } from './helpers.js';
 
 const GENERATED = 100_000;
@@ -31,12 +34,18 @@ const TIME_LIMIT_MS = 60_000;
 const plain = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Every quick-start row, i.e. everything that is not flagged as generated. */
+/** Compares two snapshots table by table (a readable failure instead of a diff of thousands of rows). */
+function assertSameSnapshot(actual, expected, label) {
+  assert.deepEqual(Object.keys(actual), Object.keys(expected));
+  for (const table of Object.keys(expected)) assertSameRows(actual[table], expected[table], `${label}: ${table}`);
+}
+
+/** Every quick-start row, i.e. everything that is not flagged as generated - the tenants' serial counters included. */
 function quickStartSnapshot(db) {
   const rows = (sql) => db.all(sql).map((row) => ({ ...row }));
   const seedCourses = 'SELECT id FROM courses WHERE is_generated = 0';
   return {
-    tenants: rows('SELECT id, name, code, timezone FROM tenants ORDER BY id'),
+    tenants: rows('SELECT * FROM tenants ORDER BY id'),
     admins: rows('SELECT * FROM admins ORDER BY id'),
     courses: rows('SELECT * FROM courses WHERE is_generated = 0 ORDER BY id'),
     learners: rows('SELECT * FROM learners WHERE is_generated = 0 ORDER BY id'),
@@ -93,7 +102,15 @@ describe('A6 - 100,000-certificate export', { timeout: 300_000 }, () => {
     t.diagnostic(generatorOutput.trim().split('\n').slice(-3).join(' | '));
     assert.equal(db.get('SELECT COUNT(*) AS n FROM certificates WHERE tenant_id = 1').n, EAST_TOTAL);
     assert.equal(db.get('SELECT COUNT(*) AS n FROM certificates WHERE tenant_id = 2').n, SEED.west.certificateCount);
-    assert.deepEqual(quickStartSnapshot(db), before100k);
+    assertSameSnapshot(quickStartSnapshot(db), before100k, 'quick-start rows after generating');
+    assert.deepEqual(before100k.tenants.map((tenant) => [tenant.name, tenant.last_serial]), [['East', 7], ['West', 4]]);
+
+    // Generated certificates are numbered in a range of their own, 1 to 100,000.
+    const serials = db.get(
+      `SELECT COUNT(*) AS n, MIN(serial_number) AS first, MAX(serial_number) AS last
+         FROM certificates WHERE tenant_id = 1 AND serial_number GLOB 'EAST-LT-[0-9][0-9][0-9][0-9][0-9][0-9][0-9]'`,
+    );
+    assert.deepEqual({ ...serials }, { n: GENERATED, first: 'EAST-LT-0000001', last: 'EAST-LT-0100000' });
 
     // The demo scenario behaves exactly as before: same roster, same Alex Lee, West unaffected.
     const roster = (await alice.get(`/api/courses/${SEED.east.safety101}/enrollments`)).json;
@@ -115,28 +132,31 @@ describe('A6 - 100,000-certificate export', { timeout: 300_000 }, () => {
     assert.ok(distinct.instants < EAST_TOTAL / 10);
   });
 
+  /** The search rule, restated: the text appears somewhere, case and accents aside. */
+  const contains = (value, needle) => referenceFold(value).includes(needle);
+
   const scenarios = [
     {
-      name: 'search "son", sorted by learner name ascending',
-      query: 'q=son&sort=learner&order=asc',
-      matches: (row) => /son/i.test(row.learner_name) || /son/i.test(row.serial_number),
-      compare: (a, b) => nocaseCompare(a.learner_name, b.learner_name) || a.id - b.id,
-      sortKey: (row) => row.learner_name.toLowerCase(),
+      name: 'search "SON", sorted by learner name ascending',
+      query: 'q=SON&sort=learner&order=asc',
+      matches: (row) => contains(row.learner_name, 'son') || contains(row.serial_number, 'son'),
+      compare: (a, b) => foldedCompare(a.learner_name, b.learner_name) || a.id - b.id,
+      sortKey: (row) => referenceFold(row.learner_name),
     },
     {
       name: 'search "a" + active only, sorted by issue date descending',
       query: 'q=a&status=active&sort=issued&order=desc',
-      matches: (row) => row.status === 'active' && (/a/i.test(row.learner_name) || /a/i.test(row.serial_number)),
+      matches: (row) => row.status === 'active' && (contains(row.learner_name, 'a') || contains(row.serial_number, 'a')),
       compare: (a, b) =>
         plain(b.issued_local_date, a.issued_local_date) || plain(b.issued_at, a.issued_at) || b.id - a.id,
       sortKey: (row) => row.issued_local_date,
     },
     {
-      name: 'search by serial prefix, sorted by course title descending',
-      query: 'q=EAST-00&sort=course&order=desc',
-      matches: (row) => /EAST-00/i.test(row.learner_name) || /EAST-00/i.test(row.serial_number),
-      compare: (a, b) => nocaseCompare(b.course_title, a.course_title) || b.id - a.id,
-      sortKey: (row) => row.course_title.toLowerCase(),
+      name: 'search by a fragment of the serial number, sorted by course title descending',
+      query: 'q=east-lt-000&sort=course&order=desc',
+      matches: (row) => contains(row.learner_name, 'east-lt-000') || contains(row.serial_number, 'east-lt-000'),
+      compare: (a, b) => foldedCompare(b.course_title, a.course_title) || b.id - a.id,
+      sortKey: (row) => referenceFold(row.course_title),
     },
   ];
 
@@ -245,8 +265,41 @@ describe('A6 - 100,000-certificate export', { timeout: 300_000 }, () => {
       `${latencies.length} list requests answered during ${finished.map((f) => f.ms.toFixed(0)).join('/')} ms exports; ` +
         `slowest ${worst.toFixed(0)} ms, median ${[...latencies].sort((a, b) => a - b)[Math.floor(latencies.length / 2)].toFixed(0)} ms`,
     );
-    assert.ok(latencies.length >= 3, 'list requests completed while the exports were still running');
-    assert.ok(worst < 2_000, `slowest concurrent list request took ${worst.toFixed(0)} ms`);
+    // An export that kept the server busy until it was done would let at most a request or two
+    // through in all that time, however fast the machine.
+    assert.ok(latencies.length >= 20, `only ${latencies.length} list requests were answered while the exports were running`);
+    assert.ok(worst < 1_000, `slowest concurrent list request took ${worst.toFixed(0)} ms`);
+  });
+
+  it('an export whose filter matches next to nothing does not hold other requests up either', async (t) => {
+    // To find its few rows such an export has to look at every certificate of the tenant. It must
+    // do so in small steps: everything else the server has to do fits in between them.
+    for (const { query, rows } of [
+      { query: 'q=no-such-name-anywhere&sort=learner', rows: 0 },
+      { query: 'q=Alex%20Lee&sort=course&order=desc', rows: 1 },
+      { query: 'q=east-lt-0099999&status=active&sort=issued', rows: null },
+    ]) {
+      let running = true;
+      const exported = timed(() => alice.get(`/api/certificates/export.csv?${query}`)).finally(() => {
+        running = false;
+      });
+      const latencies = [];
+      while (running) {
+        const { value, ms } = await timed(() => alice.get('/api/certificates?pageSize=25'));
+        assert.equal(value.status, 200);
+        if (running) latencies.push(ms); // started and finished while the export was at work
+      }
+      const { value, ms } = await exported;
+      assert.equal(value.status, 200);
+      const exportedRows = parseCsv(value.text).length - 1;
+      if (rows !== null) assert.equal(exportedRows, rows, query);
+      assert.ok(exportedRows <= 1, query);
+
+      const worst = Math.max(0, ...latencies);
+      t.diagnostic(`${query}: export ${ms.toFixed(0)} ms for ${exportedRows} row(s); ${latencies.length} list requests answered meanwhile, slowest ${worst.toFixed(0)} ms`);
+      assert.ok(latencies.length >= 10, `${query}: only ${latencies.length} list requests were answered during the ${ms.toFixed(0)} ms export`);
+      assert.ok(worst < 1_000, `${query}: slowest concurrent list request took ${worst.toFixed(0)} ms`);
+    }
   });
 
   it('a stalled download blocks neither reads nor writes, and keeps its own consistent snapshot', async (t) => {
@@ -295,10 +348,13 @@ describe('A6 - 100,000-certificate export', { timeout: 300_000 }, () => {
     const newSerials = issue.value.json.results.filter((r) => r.outcome === 'issued').map((r) => r.serialNumber);
     assert.ok(newSerials.every((serial) => !rows.some((r) => r[2] === serial)));
 
-    // A fresh export does include them.
+    // A fresh export does include them - and they carry the next numbers of the tenant's own
+    // series, right after the seven quick-start certificates: the load-test rows did not use any up.
     const fresh = parseCsv((await alice.get('/api/certificates/export.csv?sort=serial&order=asc')).text).slice(1);
     assert.equal(fresh.length, EAST_TOTAL + 2);
-    assert.deepEqual(fresh.slice(-2).map((r) => r[2]), newSerials.sort());
+    assert.deepEqual(newSerials.sort(), ['EAST-0000008', 'EAST-0000009']);
+    assert.deepEqual(fresh.slice(SEED.east.certificateCount, SEED.east.certificateCount + 2).map((r) => r[2]), newSerials);
+    assert.equal(fresh[SEED.east.certificateCount + 2][2], 'EAST-LT-0000001');
   });
 
   it('an abandoned download releases its snapshot and connection', async () => {
@@ -316,6 +372,50 @@ describe('A6 - 100,000-certificate export', { timeout: 300_000 }, () => {
     }
     assert.equal(pinnedFrames, 0);
     assert.equal((await alice.get('/api/certificates?pageSize=1')).status, 200);
+  });
+
+  it('EXPORT_MAX_CONCURRENT and EXPORT_IDLE_TIMEOUT_MS: an export waits for the only slot until the stalled download holding it is dropped', async (t) => {
+    // One slot, and half a second of patience with clients that stop reading.
+    const impatient = await startServer(dbPath, { env: { EXPORT_MAX_CONCURRENT: '1', EXPORT_IDLE_TIMEOUT_MS: '500', LOG_REQUESTS: '1' } });
+    try {
+      const client = clientFor(impatient.baseUrl, ALICE);
+      const stalled = await openStream(impatient.baseUrl, '/api/certificates/export.csv?sort=serial', ALICE);
+      const next = timed(() => client.get('/api/certificates/export.csv?q=Alex%20Lee'));
+
+      // Either the server drops the stalled download, or - on a machine whose socket buffers are
+      // large enough to swallow the whole file - it has simply finished sending it.
+      const dropped = () => impatient.output().includes('[export] download dropped: the client accepted no data for 500 ms');
+      const finished = () => /GET \/api\/certificates\/export\.csv\?sort=serial -> 200/.test(impatient.output());
+      await until(() => dropped() || finished(), { timeoutMs: 20_000, label: 'the stalled download to be dropped' });
+      if (!dropped()) {
+        t.diagnostic('the socket buffers of this machine took the whole export; a stalled download cannot be produced here');
+        await stalled.resume();
+        await next;
+        return;
+      }
+
+      const { value, ms } = await next;
+      assert.equal(value.status, 200);
+      const served = parseCsv(value.text).slice(1);
+      assert.ok(served.length >= 1 && served.every((row) => row[0] === 'Alex Lee') && served.some((row) => row[2] === 'EAST-0000001'));
+      // It was sent the moment the stalled download had started: with a slot to spare it would
+      // have been answered in a few milliseconds, not after the half second the idle timeout takes.
+      assert.ok(ms >= 400, `the next export had to wait for the slot (${ms.toFixed(0)} ms)`);
+      await assert.rejects(stalled.resume(), 'the dropped download ends as a broken transfer, not as a complete file');
+      t.diagnostic(`stalled download dropped; the export waiting behind it was served after ${ms.toFixed(0)} ms`);
+
+      // Its snapshot is gone as well: the write-ahead log can be checkpointed completely again.
+      let pinnedFrames = Infinity;
+      for (let attempt = 0; attempt < 40 && pinnedFrames !== 0; attempt += 1) {
+        await sleep(50);
+        assert.equal((await client.bulkIssue(SEED.east.firstAid)).status, 201);
+        const checkpoint = db.get('PRAGMA wal_checkpoint(PASSIVE)');
+        pinnedFrames = checkpoint.busy === 0 ? checkpoint.log - checkpoint.checkpointed : Infinity;
+      }
+      assert.equal(pinnedFrames, 0);
+    } finally {
+      await impatient.stop();
+    }
   });
 
   it('requests keep flowing while the generator rewrites 100,000 rows; a write sent meanwhile completes afterwards', async (t) => {
@@ -390,16 +490,32 @@ describe('A6 - 100,000-certificate export', { timeout: 300_000 }, () => {
     ).n;
     assert.equal(eastTotal(), eastQuickStart + GENERATED);
 
+    const counters = () => db.all('SELECT name, last_serial FROM tenants ORDER BY id').map((tenant) => ({ ...tenant }));
+    const countersBefore = counters();
+    const generated = () =>
+      db
+        .all(
+          `SELECT serial_number, learner_name, course_title, status, issued_at, issued_local_date, revoked_at
+             FROM certificates WHERE tenant_id = 1 AND course_id IN (SELECT id FROM courses WHERE is_generated = 1) ORDER BY id`,
+        )
+        .map((row) => ({ ...row }));
+
     await runScript('generate-certificates.js', ['--tenant', 'East', '--count', '2000', '--db', dbPath]);
     assert.equal(eastTotal(), eastQuickStart + 2000);
+    const firstRun = generated();
+    assert.deepEqual([firstRun[0].serial_number, firstRun.at(-1).serial_number], ['EAST-LT-0000001', 'EAST-LT-0002000']);
+    await runScript('generate-certificates.js', ['--tenant', 'East', '--count', '2000', '--db', dbPath]);
+    assertSameRows(generated(), firstRun, 'a second run produces the very same rows');
+    assert.deepEqual(counters(), countersBefore, 'no run touches the serial counters');
 
     await runScript('generate-certificates.js', ['--tenant', 'East', '--clear', '--db', dbPath]);
     assert.equal(eastTotal(), eastQuickStart);
     assert.equal(db.get('SELECT COUNT(*) AS n FROM learners WHERE is_generated = 1').n, 0);
     assert.equal(db.get('SELECT COUNT(*) AS n FROM courses WHERE is_generated = 1').n, 0);
     assert.equal((await alice.get('/api/certificates')).json.total, eastQuickStart);
-    assert.equal((await alice.get('/api/certificates?q=load%20test')).json.total, 0);
+    assert.equal((await alice.get('/api/certificates?q=east-lt-')).json.total, 0);
     assert.ok((await alice.get('/api/courses')).json.items.every((course) => !course.isGenerated));
+    assert.deepEqual(counters(), countersBefore);
   });
 
   it('db:reset underneath the running server restores the quick-start data and gives the disk space back', async (t) => {
@@ -411,7 +527,7 @@ describe('A6 - 100,000-certificate export', { timeout: 300_000 }, () => {
     const reset = await timed(() => runScript('init-db.js', ['--reset', '--db', dbPath]));
     assert.match(reset.value, /Demo data restored/);
 
-    assert.deepEqual(quickStartSnapshot(db), before100k, 'row for row the dataset of a fresh install');
+    assertSameSnapshot(quickStartSnapshot(db), before100k, 'after the reset');
     assert.equal(db.get('SELECT COUNT(*) AS n FROM certificates').n, SEED.east.certificateCount + SEED.west.certificateCount);
     assert.equal(db.get('SELECT last_serial FROM tenants WHERE id = 1').last_serial, SEED.east.certificateCount);
     assert.equal((await alice.get('/api/certificates')).json.total, SEED.east.certificateCount);

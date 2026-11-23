@@ -9,7 +9,7 @@
  */
 
 /** Bump whenever SCHEMA_SQL changes; a database file from another version is refused at start-up. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const SCHEMA_SQL = `
 CREATE TABLE tenants (
@@ -43,7 +43,7 @@ CREATE TABLE courses (
 CREATE TABLE learners (
   id           INTEGER PRIMARY KEY,
   tenant_id    INTEGER NOT NULL REFERENCES tenants (id),
-  full_name    TEXT    NOT NULL,
+  full_name    TEXT    NOT NULL CHECK (length(trim(full_name)) > 0),
   email        TEXT,
   is_generated INTEGER NOT NULL DEFAULT 0 CHECK (is_generated IN (0, 1)),
   created_at   TEXT    NOT NULL,
@@ -105,6 +105,10 @@ CREATE TABLE certificates (
   -- learner or course is renamed. It also keeps list/search/export free of joins.
   learner_name        TEXT    NOT NULL CHECK (length(trim(learner_name)) > 0),
   course_title        TEXT    NOT NULL CHECK (length(trim(course_title)) > 0),
+  -- The same two names folded for search and sort (case and accents removed, see lib/text.js).
+  -- SQLite itself only folds ASCII letters, so the folding is done once, when the row is written.
+  learner_name_key    TEXT    NOT NULL,
+  course_title_key    TEXT    NOT NULL,
   status              TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
   issued_at           TEXT    NOT NULL,           -- UTC instant, ISO-8601 (source of truth)
   -- Calendar date of issued_at in the tenant's time zone, materialised at issue time so that
@@ -128,9 +132,11 @@ CREATE TABLE certificates (
   FOREIGN KEY (revoked_by_admin_id, tenant_id) REFERENCES admins (id, tenant_id)
 ) STRICT;
 -- One index per sort order, each ending in id: the deterministic tie-breaker for equal sort keys.
+-- The learner index also carries the other two columns a search or status filter looks at, so
+-- counting the matches of a search reads this index alone, without visiting the table.
 CREATE INDEX idx_certificates_issued  ON certificates (tenant_id, issued_local_date, issued_at, id);
-CREATE INDEX idx_certificates_learner ON certificates (tenant_id, learner_name COLLATE NOCASE, id);
-CREATE INDEX idx_certificates_course  ON certificates (tenant_id, course_title COLLATE NOCASE, id);
+CREATE INDEX idx_certificates_learner ON certificates (tenant_id, learner_name_key, id, serial_number, status);
+CREATE INDEX idx_certificates_course  ON certificates (tenant_id, course_title_key, id);
 CREATE INDEX idx_certificates_serial  ON certificates (tenant_id, serial_number, id);
 CREATE INDEX idx_certificates_status  ON certificates (tenant_id, status, id);
 CREATE INDEX idx_certificates_learner_id ON certificates (learner_id);

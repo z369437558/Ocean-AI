@@ -2,6 +2,7 @@
  * Low-level write primitives shared by the API, the demo seed and the load-test generator.
  * All of them expect to run inside a transaction owned by the caller.
  */
+import { foldText } from '../lib/text.js';
 import { localDate, toUtcIso } from '../lib/time.js';
 
 export const AUDIT_ACTIONS = Object.freeze({
@@ -52,8 +53,10 @@ export function issueCertificate(db, { tenant, actor, course, learner, enrollmen
   const serialNumber = formatSerial(tenant.code, reserveSerials(db, tenant.id, 1));
   const certificateId = db.run(
     `INSERT INTO certificates (tenant_id, course_id, learner_id, enrollment_id, serial_number, learner_name, course_title,
+                               learner_name_key, course_title_key,
                                status, issued_at, issued_local_date, issued_by_admin_id, bulk_operation_id)
      VALUES (@tenantId, @courseId, @learnerId, @enrollmentId, @serialNumber, @learnerName, @courseTitle,
+             @learnerNameKey, @courseTitleKey,
              'active', @issuedAt, @issuedLocalDate, @issuedByAdminId, @bulkOperationId)`,
     {
       tenantId: tenant.id,
@@ -63,6 +66,8 @@ export function issueCertificate(db, { tenant, actor, course, learner, enrollmen
       serialNumber,
       learnerName: learner.name,
       courseTitle: course.title,
+      learnerNameKey: foldText(learner.name),
+      courseTitleKey: foldText(course.title),
       issuedAt: issuedAtIso,
       issuedLocalDate: localDate(issuedAtIso, tenant.timezone),
       issuedByAdminId: actor.adminId ?? null,

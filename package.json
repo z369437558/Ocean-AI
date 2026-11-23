@@ -9,17 +9,20 @@
     "frontend"
   ],
   "engines": {
-    "node": ">=20.19.0"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
     "prestart": "node scripts/preflight.mjs",
-    "start": "npm install --no-audit --no-fund && npm run build --workspace frontend && npm run start --workspace backend",
+    "start": "npm install --include=dev --no-audit --no-fund && npm run build --workspace frontend && npm run start --workspace backend",
     "pretest": "node scripts/preflight.mjs",
-    "test": "npm install --no-audit --no-fund && npm run test --workspace backend",
+    "test": "npm install --include=dev --no-audit --no-fund && npm run test --workspace backend",
     "serve": "npm run start --workspace backend",
     "build": "npm run build --workspace frontend",
     "dev": "node scripts/dev.mjs",
     "db:reset": "npm run db:reset --workspace backend",
     "generate:east": "npm run generate:east --workspace backend --"
+  },
+  "allowScripts": {
+    "better-sqlite3": true
   }
 }
