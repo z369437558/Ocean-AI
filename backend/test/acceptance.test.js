@@ -3,6 +3,7 @@
  * database and server process, so suites are independent and can run in any order.
  */
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
@@ -20,8 +21,13 @@ import {
   nocaseCompare,
   parseCsv,
   removeTempDir,
+  runScript,
+  runScriptToExit,
+  runServerToExit,
   startFreshServer,
   startServer,
+  stillPending,
+  timed,
 } from './helpers.js';
 
 const EAST = 1;
@@ -355,6 +361,204 @@ describe('A2 - retry safety / idempotency', () => {
   });
 });
 
+describe('A2 - while another process holds the database write lock', () => {
+  // `locker` plays another process in the middle of a long write (the load-test generator, a
+  // reset, ...). While it holds the lock no request can write, which makes "these two requests
+  // overlap" a certainty instead of a matter of timing.
+  let ctx;
+  let second;
+  let db;
+  let locker;
+  let servers;
+  const PROMPT_MS = 1500;
+
+  before(async () => {
+    ctx = await startFreshServer();
+    second = await startServer(ctx.dbPath);
+    db = ctx.openDb();
+    locker = ctx.openDb();
+    servers = [ctx.baseUrl, second.baseUrl];
+  });
+  after(async () => {
+    locker.close(); // rolls back if a failed test left the lock behind
+    db.close();
+    await second.stop();
+    await ctx.close();
+  });
+
+  /** Runs `fn` while the write lock is held; `release()` gives it up early (with a COMMIT). */
+  async function whileLocked(fn) {
+    locker.exec('BEGIN IMMEDIATE');
+    let held = true;
+    const release = () => {
+      if (held) locker.exec('COMMIT');
+      held = false;
+    };
+    try {
+      return await fn(release);
+    } finally {
+      if (held) locker.exec('ROLLBACK');
+    }
+  }
+
+  async function assertReadsAreServed(label) {
+    for (const baseUrl of servers) {
+      const list = await timed(() => clientFor(baseUrl, BOB).get('/api/certificates?pageSize=5'));
+      assert.equal(list.value.status, 200);
+      assert.ok(list.ms < PROMPT_MS, `${label}: list took ${Math.round(list.ms)} ms on ${baseUrl}`);
+    }
+  }
+
+  it('identical requests to two servers overlap for certain and still execute exactly once', async () => {
+    const before = countRows(db, WEST);
+
+    const responses = await whileLocked(async (release) => {
+      const requests = servers.map((baseUrl) => clientFor(baseUrl, BOB).bulkIssue(SEED.west.safety101, 'overlap-1'));
+      // Neither request can finish while the lock is held, so from here on both are in flight...
+      assert.equal(await stillPending(Promise.race(requests), 400), true, 'both requests wait for the lock');
+      // ...and neither server is frozen by its waiting request.
+      await assertReadsAreServed('while a bulk issue waits');
+      assert.deepEqual(countRows(db, WEST), before, 'nothing is written before the lock is free');
+      assert.equal(await stillPending(Promise.race(requests), 50), true);
+
+      release();
+      return Promise.all(requests);
+    });
+
+    assert.deepEqual(responses.map((r) => r.status), [201, 201]);
+    assert.equal(responses[0].text, responses[1].text, 'both callers received the same outcome');
+    assert.deepEqual(responses.map((r) => r.headers.get('idempotent-replayed')).sort(), ['false', 'true'], 'one execution, one replay');
+    assert.deepEqual(responses[0].json.summary, { total: 5, issued: 2, skipped: 3, failed: 0 });
+    assert.deepEqual(countRows(db, WEST), {
+      certificates: before.certificates + 2,
+      auditEvents: before.auditEvents + 2,
+      operations: before.operations + 1,
+    });
+    assert.ok(issuanceLedger(db, SEED.west.safety101).every((l) => l.certificates <= 1 && l.issued_events === l.certificates));
+  });
+
+  it('one key with two payloads on two servers: one executes, the other is a 409', async () => {
+    const before = countRows(db, WEST);
+    const responses = await whileLocked(async (release) => {
+      const requests = [
+        clientFor(servers[0], BOB).bulkIssue(SEED.west.heights, 'overlap-2'),
+        clientFor(servers[1], BOB).bulkIssue(SEED.west.manualHandling, 'overlap-2'),
+      ];
+      assert.equal(await stillPending(Promise.race(requests), 400), true);
+      release();
+      return Promise.all(requests);
+    });
+
+    assert.deepEqual(responses.map((r) => r.status).sort(), [201, 409]);
+    const winner = responses.find((r) => r.status === 201);
+    const loser = responses.find((r) => r.status === 409);
+    assert.equal(loser.json.error.code, 'idempotency_key_reused');
+    assert.equal(loser.json.error.details.operationId, winner.json.id);
+    assert.deepEqual(countRows(db, WEST), {
+      certificates: before.certificates + winner.json.summary.issued,
+      auditEvents: before.auditEvents + winner.json.summary.issued,
+      operations: before.operations + 1,
+    });
+    // The stored result belongs to the winner and is what every later retry of it gets.
+    const retry = await clientFor(servers[1], BOB).bulkIssue(winner.json.course.id, 'overlap-2');
+    assert.equal(retry.text, winner.text);
+  });
+
+  it('a key that already ran needs no lock: replays, conflicts and rejections are answered at once', async () => {
+    const alice = clientFor(ctx.baseUrl, ALICE);
+    const original = await alice.bulkIssue(SEED.east.safety101, 'stored-1');
+    assert.equal(original.status, 201);
+    const settled = countRows(db);
+
+    await whileLocked(async () => {
+      const prompt = async (label, send) => {
+        const res = await timed(send);
+        assert.ok(res.ms < PROMPT_MS, `${label} took ${Math.round(res.ms)} ms`);
+        return res.value;
+      };
+      for (const baseUrl of servers) {
+        const client = clientFor(baseUrl, ALICE);
+        const replay = await prompt('replay', () => client.bulkIssue(SEED.east.safety101, 'stored-1'));
+        assert.equal(replay.status, 201);
+        assert.equal(replay.headers.get('idempotent-replayed'), 'true');
+        assert.equal(replay.text, original.text);
+
+        const conflict = await prompt('conflict', () => client.bulkIssue(SEED.east.firstAid, 'stored-1'));
+        assert.equal(conflict.status, 409);
+
+        const garbled = await prompt('unreadable body', () =>
+          client.post('/api/bulk-issues', undefined, { rawBody: '{"courseId":', headers: { 'Idempotency-Key': 'stored-1' } }),
+        );
+        assert.equal(garbled.status, 409);
+
+        // Requests that are wrong on their face do not queue for the lock either.
+        assert.equal((await prompt('unknown course', () => client.bulkIssue(999999, 'fresh-1'))).status, 404);
+        assert.equal((await prompt("another tenant's course", () => client.bulkIssue(SEED.west.safety101, 'fresh-1'))).status, 404);
+        assert.equal((await prompt('invalid body', () => client.post('/api/bulk-issues', {}, { headers: { 'Idempotency-Key': 'fresh-1' } }))).status, 400);
+
+        const repeatRevoke = await prompt('repeat revoke', () => client.post(`/api/certificates/${SEED.east.revokedCertificate}/revoke`, {}));
+        assert.equal(repeatRevoke.status, 200);
+        assert.equal(repeatRevoke.json.alreadyRevoked, true);
+        assert.equal((await prompt('revoke of a missing certificate', () => client.post('/api/certificates/999999/revoke', {}))).status, 404);
+      }
+    });
+    assert.deepEqual(countRows(db), settled, 'none of it wrote anything');
+  });
+
+  it('a new revocation waits for the lock, then takes effect once', async () => {
+    const id = SEED.west.alexLeeCertificate;
+    const before = countRows(db, WEST);
+    const responses = await whileLocked(async (release) => {
+      const requests = servers.map((baseUrl) => clientFor(baseUrl, BOB).post(`/api/certificates/${id}/revoke`, { reason: 'Lock test' }));
+      assert.equal(await stillPending(Promise.race(requests), 400), true, 'both revocations wait for the lock');
+      await assertReadsAreServed('while a revocation waits');
+      assert.equal((await clientFor(ctx.baseUrl, BOB).get(`/api/certificates/${id}`)).json.status, 'active');
+      release();
+      return Promise.all(requests);
+    });
+
+    assert.deepEqual(responses.map((r) => r.status), [200, 200]);
+    assert.deepEqual(responses.map((r) => r.json.alreadyRevoked).sort(), [false, true]);
+    assert.equal(responses[0].json.revokedAt, responses[1].json.revokedAt);
+    assert.deepEqual(countRows(db, WEST), { ...before, auditEvents: before.auditEvents + 1 });
+  });
+
+  it('answers 503 with Retry-After when the lock is not released in time, and the retry then runs', async () => {
+    const impatient = await startServer(ctx.dbPath, { env: { DB_BUSY_TIMEOUT_MS: '300' } });
+    try {
+      const alice = clientFor(impatient.baseUrl, ALICE);
+      const before = countRows(db, EAST);
+      const activeCertificate = 5;
+
+      await whileLocked(async () => {
+        for (const [label, send] of [
+          ['bulk issue', () => alice.bulkIssue(SEED.east.firstAid, 'busy-1')],
+          ['revoke', () => alice.post(`/api/certificates/${activeCertificate}/revoke`, { reason: 'busy' })],
+        ]) {
+          const res = await timed(send);
+          assert.equal(res.value.status, 503, label);
+          assert.equal(res.value.json.error.code, 'database_busy', label);
+          assert.equal(res.value.headers.get('retry-after'), '1', label);
+          assert.ok(res.ms >= 250 && res.ms < 5000, `${label} gave up after ${Math.round(res.ms)} ms`);
+        }
+        assert.equal((await alice.get('/api/certificates?pageSize=5')).status, 200, 'reads are unaffected');
+      });
+      assert.deepEqual(countRows(db, EAST), before, 'a 503 wrote nothing');
+
+      // The 503 did not burn the key: the retry is the first (and only) execution.
+      const retry = await alice.bulkIssue(SEED.east.firstAid, 'busy-1');
+      assert.equal(retry.status, 201);
+      assert.equal(retry.headers.get('idempotent-replayed'), 'false');
+      assert.equal(retry.json.summary.issued, 1);
+      const revoked = await alice.post(`/api/certificates/${activeCertificate}/revoke`, { reason: 'busy' });
+      assert.equal(revoked.status, 200);
+      assert.equal(revoked.json.alreadyRevoked, false);
+    } finally {
+      await impatient.stop();
+    }
+  });
+});
+
 describe('A3 - idempotency key misuse', () => {
   let ctx;
   let db;
@@ -435,6 +639,71 @@ describe('A3 - idempotency key misuse', () => {
       auditEvents: before.auditEvents + winner.json.summary.issued,
       operations: before.operations + 1,
     });
+  });
+
+  /** Requests whose body never becomes a JSON object, with the status they get when the key is unused. */
+  const UNREADABLE_BODIES = [
+    { label: 'truncated JSON', rawBody: '{"courseId": ', status: 400 },
+    { label: 'not JSON at all', rawBody: 'courseId=1', status: 400 },
+    { label: 'a bare JSON string', rawBody: '"1"', status: 400 },
+    { label: 'a JSON array', rawBody: '[1]', status: 400 },
+    { label: 'no body', rawBody: undefined, status: 400 },
+    { label: 'an oversized body', rawBody: JSON.stringify({ courseId: 1, padding: 'x'.repeat(150_000) }), status: 413 },
+    { label: 'an unsupported charset', rawBody: '{"courseId":1}', headers: { 'Content-Type': 'application/json; charset=latin1' }, status: 415 },
+    { label: 'an unsupported content encoding', rawBody: '{"courseId":1}', headers: { 'Content-Encoding': 'x-unknown' }, status: 415 },
+    { label: 'a corrupt compressed body', rawBody: 'not gzip', headers: { 'Content-Encoding': 'gzip' }, status: 400 },
+  ];
+  const sendRaw = (key, { rawBody, headers = {} }) =>
+    alice.post('/api/bulk-issues', undefined, {
+      rawBody,
+      headers: { 'Content-Type': 'application/json', ...headers, 'Idempotency-Key': key },
+    });
+
+  it('a body the server cannot even read is still a 409 once the key has been used', async () => {
+    const original = await alice.bulkIssue(SEED.east.safety101, 'misuse-1');
+    assert.equal(original.status, 201);
+    const settled = countRows(db);
+
+    for (const unreadable of UNREADABLE_BODIES) {
+      const res = await sendRaw('misuse-1', unreadable);
+      assert.equal(res.status, 409, unreadable.label);
+      assert.equal(res.json.error.code, 'idempotency_key_reused', unreadable.label);
+      assert.equal(res.json.error.details.operationId, original.json.id, unreadable.label);
+    }
+    assert.deepEqual(countRows(db), settled, 'nothing ran');
+    assert.equal((await alice.bulkIssue(SEED.east.safety101, 'misuse-1')).text, original.text, 'the stored result is intact');
+  });
+
+  it('with an unused key the same bodies are ordinary client errors that leave the key usable', async () => {
+    const settled = countRows(db);
+    for (const [index, unreadable] of UNREADABLE_BODIES.entries()) {
+      const res = await sendRaw(`unreadable-${index}`, unreadable);
+      assert.equal(res.status, unreadable.status, unreadable.label);
+      assert.notEqual(res.json.error.code, 'idempotency_key_reused', unreadable.label);
+    }
+    assert.deepEqual(countRows(db), settled, 'no operation and no idempotency record was stored');
+
+    const ok = await alice.bulkIssue(SEED.east.safety101, 'unreadable-0');
+    assert.equal(ok.status, 201);
+    assert.equal(ok.headers.get('idempotent-replayed'), 'false');
+  });
+
+  it('deeply nested JSON is a payload like any other, never a server error', async () => {
+    const send = (key, depth) =>
+      sendRaw(key, { rawBody: `{"courseId":${SEED.east.forklift},"extra":${'['.repeat(depth)}${']'.repeat(depth)}}` });
+
+    const first = await send('deep-1', 20_000);
+    assert.equal(first.status, 201);
+    const retry = await send('deep-1', 20_000);
+    assert.equal(retry.status, 201);
+    assert.equal(retry.headers.get('idempotent-replayed'), 'true');
+    assert.equal(retry.text, first.text);
+
+    assert.equal((await send('deep-1', 20_001)).status, 409, 'one level deeper is a different payload');
+    assert.equal((await send('misuse-1', 20_000)).status, 409);
+    assert.equal((await alice.post(`/api/certificates/${SEED.east.revokedCertificate}/revoke`, undefined, {
+      rawBody: `{"reason":${'['.repeat(20_000)}${']'.repeat(20_000)}}`,
+    })).status, 400);
   });
 
   it('a rejected request does not burn the key', async () => {
@@ -813,8 +1082,23 @@ describe('A7 - revocation and its audit trail', () => {
     assert.equal((await alice.post('/api/certificates/not-a-number/revoke', {})).status, 404);
     assert.equal((await alice.post('/api/certificates/4/revoke', { reason: 'x'.repeat(501) })).status, 400);
     assert.equal((await alice.post('/api/certificates/4/revoke', { reason: 42 })).status, 400);
+    assert.equal((await alice.post('/api/certificates/4/revoke', undefined, { rawBody: '{"reason": ' })).status, 400);
+    for (const reason of ['nul\u0000byte', 'bell\u0007', 'escape\u001b[31m', 'delete\u007f', 'lone \ud800 surrogate', '\udc00 trailing half']) {
+      const res = await alice.post('/api/certificates/4/revoke', { reason });
+      assert.equal(res.status, 400, JSON.stringify(reason));
+      assert.equal(res.json.error.code, 'invalid_request');
+    }
     assert.equal((await alice.get('/api/certificates/4')).json.status, 'active');
     assert.deepEqual(countRows(db), before);
+  });
+
+  it('stores a multi-line, non-ASCII reason exactly as written', async () => {
+    const reason = 'Line one\nLine two\twith a tab\r\nJosé 李 😀';
+    const res = await alice.post('/api/certificates/5/revoke', { reason: `  ${reason}  ` });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.revocationReason, reason);
+    assert.equal(res.json.auditEvents.at(-1).details.reason, reason);
+    assert.equal((await alice.get('/api/certificates/5')).json.revocationReason, reason);
   });
 });
 
@@ -884,13 +1168,38 @@ describe('certificate list: search, sort, pagination', () => {
   });
 
   it('rejects malformed list parameters with a 400', async () => {
-    for (const query of ['sort=password', 'order=up', 'status=gone', 'page=0', 'page=abc', 'pageSize=1000']) {
+    for (const query of [
+      'sort=password',
+      'order=up',
+      'status=gone',
+      'page=0',
+      'page=abc',
+      'pageSize=1000',
+      // property names every JavaScript object has are not sort columns
+      'sort=constructor',
+      'sort=constructor&order=asc',
+      'sort=-constructor',
+      'sort=__proto__&order=asc',
+      'sort=-toString',
+      'sort=hasOwnProperty&order=asc',
+      // control characters in the search text
+      'q=a%00b',
+      'q=%1B%5B31m',
+      'q=line%0Abreak',
+    ]) {
       const res = await alice.get(`/api/certificates?${query}`);
       assert.equal(res.status, 400, query);
       assert.equal(res.json.error.code, 'invalid_request');
       const exported = await alice.get(`/api/certificates/export.csv?${query}`);
-      if (!query.startsWith('page')) assert.equal(exported.status, 400, `export ${query}`);
+      if (!query.startsWith('page')) {
+        assert.equal(exported.status, 400, `export ${query}`);
+        assert.equal(exported.json.error.code, 'invalid_request', `export ${query}`);
+      }
     }
+    // Bytes that are not valid UTF-8 simply match nothing.
+    const undecodable = await alice.get('/api/certificates?q=%ED%A0%80');
+    assert.equal(undecodable.status, 200);
+    assert.equal(undecodable.json.total, 0);
   });
 
   it('exports exactly what the list shows for the same search and sort', async () => {
@@ -934,6 +1243,158 @@ describe('certificate list: search, sort, pagination', () => {
       assert.ok(rows.every((r) => r.length === 4), 'every record still has exactly four columns');
     } finally {
       db.close();
+    }
+  });
+});
+
+describe('start-up and maintenance commands', () => {
+  let dir;
+  before(() => {
+    dir = createTempDir('cert-admin-ops-');
+  });
+  after(() => removeTempDir(dir));
+
+  const totals = (db) =>
+    ({
+      ...db.get(
+        `SELECT (SELECT COUNT(*) FROM tenants) AS tenants, (SELECT COUNT(*) FROM admins) AS admins,
+                (SELECT COUNT(*) FROM courses) AS courses, (SELECT COUNT(*) FROM certificates) AS certificates,
+                (SELECT COUNT(*) FROM audit_events) AS auditEvents, (SELECT COUNT(*) FROM bulk_issue_operations) AS operations`,
+      ),
+    });
+  const PRISTINE = { tenants: 2, admins: 2, courses: 6, certificates: 11, auditEvents: 13, operations: 0 };
+
+  it('servers started at the same moment on a new database file all come up, with one copy of the demo data', async () => {
+    for (let round = 0; round < 4; round += 1) {
+      const dbPath = path.join(dir, `simultaneous-${round}.sqlite`);
+      const started = await Promise.allSettled([startServer(dbPath), startServer(dbPath), startServer(dbPath)]);
+      const servers = started.filter((result) => result.status === 'fulfilled').map((result) => result.value);
+      try {
+        const failures = started.filter((result) => result.status === 'rejected').map((result) => String(result.reason?.message));
+        assert.deepEqual(failures, [], `round ${round}`);
+        for (const server of servers) {
+          const list = await clientFor(server.baseUrl, ALICE).get('/api/certificates');
+          assert.equal(list.json.total, SEED.east.certificateCount);
+        }
+        const db = openDatabase(dbPath);
+        try {
+          assert.deepEqual(totals(db), PRISTINE, `round ${round}`);
+        } finally {
+          db.close();
+        }
+      } finally {
+        await Promise.all(servers.map((server) => server.stop()));
+      }
+    }
+  });
+
+  it('a port that is already taken is reported in one line, not as a crash', async () => {
+    const dbPath = path.join(dir, 'port.sqlite');
+    const first = await startServer(dbPath);
+    try {
+      const port = new URL(first.baseUrl).port;
+      const { code, output } = await runServerToExit(dbPath, { env: { PORT: port } });
+      assert.equal(code, 1);
+      assert.match(output, new RegExp(`Port ${port} is already in use`));
+      assert.doesNotMatch(output, /TypeError|^\s+at /m, 'no stack trace');
+      assert.equal((await clientFor(first.baseUrl, ALICE).get('/api/me')).status, 200, 'the running server is unaffected');
+    } finally {
+      await first.stop();
+    }
+  });
+
+  it('invalid settings and unusable database files are reported the same way', async () => {
+    const badPort = await runServerToExit(path.join(dir, 'unused.sqlite'), { env: { PORT: 'eighty' } });
+    assert.equal(badPort.code, 1);
+    assert.match(badPort.output, /PORT must be an integer/);
+    assert.doesNotMatch(badPort.output, /^\s+at /m);
+
+    const notADatabase = path.join(dir, 'not-a-database.sqlite');
+    fs.writeFileSync(notADatabase, 'this is not an SQLite file, just some text that is long enough to look like one\n'.repeat(64));
+    const corrupt = await runServerToExit(notADatabase);
+    assert.equal(corrupt.code, 1);
+    assert.match(corrupt.output, /Could not open the database/);
+    assert.doesNotMatch(corrupt.output, /^\s+at /m);
+  });
+
+  it('a database from another schema version is refused with instructions; db:reset recreates it', async () => {
+    const dbPath = path.join(dir, 'old-schema.sqlite');
+    const old = openDatabase(dbPath);
+    old.exec('CREATE TABLE leftovers (id INTEGER PRIMARY KEY)');
+    old.exec('PRAGMA user_version = 1');
+    old.close();
+
+    const refused = await runServerToExit(dbPath);
+    assert.equal(refused.code, 1);
+    assert.match(refused.output, /schema version 1 is not supported/);
+    assert.match(refused.output, /npm run db:reset/);
+    assert.doesNotMatch(refused.output, /^\s+at /m);
+
+    assert.match(await runScript('init-db.js', ['--reset', '--db', dbPath]), /recreating it/);
+    const server = await startServer(dbPath);
+    try {
+      assert.equal((await clientFor(server.baseUrl, ALICE).get('/api/certificates')).json.total, SEED.east.certificateCount);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('db:reset restores the quick-start data in place, underneath a running server', async () => {
+    const dbPath = path.join(dir, 'reset.sqlite');
+    const server = await startServer(dbPath);
+    const db = openDatabase(dbPath);
+    try {
+      const alice = clientFor(server.baseUrl, ALICE);
+      const issued = await alice.bulkIssue(SEED.east.safety101, 'before-reset');
+      assert.equal(issued.json.summary.issued, 2);
+      assert.equal((await alice.post(`/api/certificates/${SEED.east.alexLeeCertificate}/revoke`, { reason: 'x' })).status, 200);
+      assert.notDeepEqual(totals(db), PRISTINE);
+
+      assert.match(await runScript('init-db.js', ['--reset', '--db', dbPath]), /Demo data restored/);
+
+      // The server kept its connection and now serves the pristine dataset, ids included.
+      assert.deepEqual(totals(db), PRISTINE);
+      const alex = (await alice.get(`/api/certificates/${SEED.east.alexLeeCertificate}`)).json;
+      assert.deepEqual([alex.learnerName, alex.serialNumber, alex.status], ['Alex Lee', 'EAST-0000001', 'active']);
+      assert.equal((await alice.get(`/api/courses/${SEED.east.safety101}/enrollments`)).json.summary.eligible, 2);
+      assert.deepEqual((await alice.get('/api/bulk-issues')).json.items, []);
+
+      // The old idempotency record went with the old data: the same key now starts a fresh operation.
+      const again = await alice.bulkIssue(SEED.east.safety101, 'before-reset');
+      assert.equal(again.status, 201);
+      assert.equal(again.headers.get('idempotent-replayed'), 'false');
+      assert.deepEqual(again.json.results.filter((r) => r.outcome === 'issued').map((r) => r.serialNumber), ['EAST-0000008', 'EAST-0000009']);
+    } finally {
+      db.close();
+      await server.stop();
+    }
+  });
+
+  it('db:reset changes nothing while another process is in the middle of a write', async () => {
+    const dbPath = path.join(dir, 'reset-busy.sqlite');
+    const server = await startServer(dbPath);
+    const db = openDatabase(dbPath);
+    const locker = openDatabase(dbPath);
+    try {
+      const alice = clientFor(server.baseUrl, ALICE);
+      assert.equal((await alice.bulkIssue(SEED.east.safety101, 'kept')).json.summary.issued, 2);
+      const before = totals(db);
+
+      locker.exec('BEGIN IMMEDIATE');
+      const { code, output } = await runScriptToExit('init-db.js', ['--reset', '--db', dbPath], { env: { DB_BUSY_TIMEOUT_MS: '300' } });
+      locker.exec('ROLLBACK');
+
+      assert.equal(code, 1);
+      assert.match(output, /database is busy/i);
+      assert.match(output, /Nothing was changed/);
+      assert.ok(fs.existsSync(dbPath), 'the database file is still there');
+      assert.deepEqual(totals(db), before);
+      const replay = await alice.bulkIssue(SEED.east.safety101, 'kept');
+      assert.equal(replay.headers.get('idempotent-replayed'), 'true', 'the server still sees everything it wrote');
+    } finally {
+      locker.close();
+      db.close();
+      await server.stop();
     }
   });
 });

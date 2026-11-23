@@ -191,10 +191,14 @@ function insertDemoTenant(db, spec) {
   }
 }
 
-/** Inserts the demo dataset. Call only on an empty (freshly migrated) database. */
+/**
+ * Inserts the demo dataset into an empty database and returns true. Returns false, changing
+ * nothing, when data is already there - including when another process seeded it a moment ago.
+ */
 export function seedDemoData(db) {
-  db.transaction(() => {
-    if (isSeeded(db)) throw new Error('Database already contains data; refusing to seed twice');
+  return db.transaction(() => {
+    if (isSeeded(db)) return false;
     for (const tenant of DEMO_TENANTS) insertDemoTenant(db, tenant);
+    return true;
   });
 }

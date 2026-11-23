@@ -7,10 +7,7 @@ export function openInitializedDatabase(dbPath, { log = () => {} } = {}) {
   const db = openDatabase(dbPath);
   try {
     migrate(db);
-    if (!isSeeded(db)) {
-      seedDemoData(db);
-      log(`Created demo data in ${dbPath}`);
-    }
+    if (!isSeeded(db) && seedDemoData(db)) log(`Created demo data in ${dbPath}`);
   } catch (err) {
     db.close();
     throw err;

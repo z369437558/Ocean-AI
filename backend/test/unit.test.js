@@ -2,15 +2,15 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
-import { migrate } from '../src/db/schema.js';
+import { SCHEMA_VERSION, migrate } from '../src/db/schema.js';
 import { seedDemoData } from '../src/db/seed.js';
-import { TransactionAbortedError, openDatabase } from '../src/db/sqlite.js';
+import { TransactionAbortedError, enableWal, isBusyError, openDatabase } from '../src/db/sqlite.js';
 import { csvCell, csvRow } from '../src/lib/csv.js';
 import { canonicalJson, requestFingerprint } from '../src/lib/fingerprint.js';
 import { localDate, localDateTime, utcOffset } from '../src/lib/time.js';
 import { parseListQuery } from '../src/services/certificates.js';
 import { classifyEnrollment } from '../src/services/courses.js';
-import { createTempDir, parseCsv, removeTempDir } from './helpers.js';
+import { createTempDir, parseCsv, removeTempDir, stillPending } from './helpers.js';
 
 describe('time zones (A5)', () => {
   it('converts the reference instant to each tenant-local wall clock', () => {
@@ -86,6 +86,52 @@ describe('request fingerprint (A3)', () => {
     assert.notEqual(requestFingerprint('POST', '/api/bulk-issues', { courseId: '1', note: 'x' }), base);
     assert.notEqual(requestFingerprint('POST', '/api/bulk-issues', undefined), base);
   });
+
+  it('canonical JSON matches a straightforward recursive reference', () => {
+    const reference = (value) => {
+      if (Array.isArray(value)) return `[${value.map(reference).join(',')}]`;
+      if (value !== null && typeof value === 'object') {
+        return `{${Object.keys(value)
+          .sort()
+          .map((key) => `${JSON.stringify(key)}:${reference(value[key])}`)
+          .join(',')}}`;
+      }
+      return JSON.stringify(value) ?? 'null';
+    };
+    for (const sample of [
+      null,
+      true,
+      0,
+      -1.5e-7,
+      '',
+      'quote " backslash \\ newline \n unicode \u2028 é',
+      [],
+      {},
+      [[], {}, [null, [1, [2, [3]]]]],
+      { b: 1, a: { d: [1, { z: null, y: 'x' }], c: {} }, '': 0, 'a b': [true, false] },
+      { __proto__: null, constructor: 1, toString: 2 },
+    ]) {
+      assert.equal(canonicalJson(sample), reference(sample), JSON.stringify(sample));
+      assert.deepEqual(JSON.parse(canonicalJson(sample)), JSON.parse(JSON.stringify(sample)));
+    }
+  });
+
+  it('handles bodies nested far deeper than the call stack allows', () => {
+    const depth = 200_000;
+    let arrays = [];
+    let objects = { leaf: true };
+    for (let i = 0; i < depth; i += 1) {
+      arrays = [arrays];
+      objects = { b: objects, a: i % 2 };
+    }
+    assert.equal(canonicalJson(arrays), '['.repeat(depth + 1) + ']'.repeat(depth + 1));
+    assert.ok(canonicalJson(objects).startsWith('{"a":1,"b":{"a":0,"b":{'));
+    assert.match(requestFingerprint('POST', '/api/bulk-issues', { courseId: 1, extra: arrays }), /^[0-9a-f]{64}$/);
+    assert.notEqual(
+      requestFingerprint('POST', '/api/bulk-issues', { courseId: 1, extra: arrays }),
+      requestFingerprint('POST', '/api/bulk-issues', { courseId: 1, extra: [arrays] }),
+    );
+  });
 });
 
 describe('list query parsing', () => {
@@ -115,9 +161,24 @@ describe('list query parsing', () => {
       { pageSize: '-1' },
       { q: 'x'.repeat(101) },
       { q: ['a', 'b'] },
+      // names that exist on every object must not pass for sort columns
+      { sort: 'constructor' },
+      { sort: 'constructor', order: 'asc' },
+      { sort: '-constructor' },
+      { sort: 'Constructor', order: 'desc' },
+      { sort: '__proto__', order: 'asc' },
+      { sort: 'toString', order: 'asc' },
+      { sort: '-hasOwnProperty' },
+      // text that cannot be stored or matched faithfully
+      { q: 'a\u0000b' },
+      { q: 'tab\there' },
+      { q: 'line\nbreak' },
+      { q: 'lone \ud800 surrogate' },
     ]) {
       assert.throws(() => parseListQuery(query), (err) => err.status === 400, JSON.stringify(query));
     }
+    assert.equal(parseListQuery({ q: ' José 李 😀 ' }).q, 'José 李 😀', 'ordinary Unicode is welcome');
+    assert.throws(() => parseListQuery({ sort: 'constructor', order: 'asc' }), /"sort" must be one of: issued, learner, course, serial, status/);
   });
 });
 
@@ -219,6 +280,134 @@ describe('database layer', () => {
     assert.ok(new TransactionAbortedError(new Error('disk full')) instanceof Error);
   });
 
+  it('takes the write lock without blocking the event loop while another connection holds it', async () => {
+    const other = openDatabase(path.join(dir, 'unit.sqlite'));
+    try {
+      const before = tenantCount();
+      other.exec('BEGIN IMMEDIATE');
+      let ticks = 0;
+      const ticker = setInterval(() => (ticks += 1), 5);
+      const write = db.writeTransaction(() => {
+        addTenant('Waited');
+        return 'committed';
+      });
+      write.catch(() => {}); // asserted on below
+      try {
+        assert.equal(await stillPending(write, 200), true, 'the write waits for the lock');
+      } finally {
+        clearInterval(ticker);
+      }
+      assert.ok(ticks >= 10, `timers kept firing while waiting (${ticks} ticks)`);
+      assert.equal(tenantCount(), before, 'reads on the same connection are served meanwhile');
+      assert.equal(db.inTransaction, false);
+
+      other.exec('COMMIT');
+      assert.equal(await write, 'committed');
+      assert.equal(tenantCount(), before + 1);
+      db.run("DELETE FROM tenants WHERE name = 'Waited'");
+    } finally {
+      other.close();
+    }
+  });
+
+  it('gives up with a busy error when the lock is not released in time, leaving the connection usable', async () => {
+    const other = openDatabase(path.join(dir, 'unit.sqlite'));
+    try {
+      const before = tenantCount();
+      const regularTimeout = db.get('PRAGMA busy_timeout').timeout;
+      assert.ok(regularTimeout > 0);
+      other.exec('BEGIN IMMEDIATE');
+      const started = performance.now();
+      await assert.rejects(
+        db.writeTransaction(() => addTenant('Never'), { timeoutMs: 150 }),
+        (err) => isBusyError(err),
+      );
+      const waited = performance.now() - started;
+      assert.ok(waited >= 140 && waited < 3000, `waited ${waited} ms`);
+      other.exec('ROLLBACK');
+
+      assert.equal(db.inTransaction, false);
+      assert.equal(db.get('PRAGMA busy_timeout').timeout, regularTimeout, 'the regular busy timeout is back in place');
+      assert.equal(await db.writeTransaction(() => tenantCount()), before, 'and the next write goes through');
+    } finally {
+      other.close();
+    }
+  });
+
+  it('write transactions roll back on errors, nest savepoints and refuse async callbacks', async () => {
+    const before = tenantCount();
+    await assert.rejects(
+      db.writeTransaction(() => {
+        addTenant('Gone');
+        throw new Error('boom');
+      }),
+      /boom/,
+    );
+    await assert.rejects(db.writeTransaction(async () => addTenant('Async')), /must be synchronous/);
+    assert.equal(tenantCount(), before);
+
+    const names = await db.writeTransaction(() => {
+      addTenant('Kept');
+      assert.throws(() =>
+        db.transaction(() => {
+          addTenant('Undone');
+          throw new Error('inner');
+        }),
+      );
+      return db.all("SELECT name FROM tenants WHERE name IN ('Kept', 'Undone')").map((row) => row.name);
+    });
+    assert.deepEqual(names, ['Kept']);
+    db.run("DELETE FROM tenants WHERE name = 'Kept'");
+    assert.equal(db.inTransaction, false);
+  });
+
+  it('retries the switch to WAL journaling while simultaneous openers make SQLite report busy', () => {
+    assert.equal(db.get('PRAGMA journal_mode').journal_mode, 'wal');
+
+    // Two processes that open a brand-new file at the same instant collide on this statement, and
+    // SQLite reports the loser "busy" at once. The window is far too narrow to hit on demand, so
+    // the collision is played by a stand-in connection.
+    const busy = Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY', errcode: 5 });
+    let attempts = 0;
+    const collides = {
+      get(sql) {
+        assert.equal(sql, 'PRAGMA journal_mode = WAL');
+        attempts += 1;
+        if (attempts < 4) throw busy;
+        return { journal_mode: 'wal' };
+      },
+    };
+    enableWal(collides, { timeoutMs: 5_000 });
+    assert.equal(attempts, 4, 'three collisions, then the switch (or the no-op after somebody else made it)');
+
+    const failing = {
+      get() {
+        throw new Error('disk I/O error');
+      },
+    };
+    assert.throws(() => enableWal(failing, { timeoutMs: 5_000 }), /disk I\/O error/, 'other errors are not retried');
+
+    const stuck = {
+      get() {
+        throw busy;
+      },
+    };
+    const started = performance.now();
+    assert.throws(() => enableWal(stuck, { timeoutMs: 100 }), (err) => isBusyError(err));
+    const waited = performance.now() - started;
+    assert.ok(waited >= 90 && waited < 3_000, `gave up after ${waited} ms`);
+
+    const refused = { get: () => ({ journal_mode: 'delete' }) };
+    assert.throws(() => enableWal(refused, { timeoutMs: 50 }), /WAL journaling.*"delete"/);
+  });
+
+  it('tells busy errors apart from everything else', () => {
+    assert.equal(isBusyError(new Error('UNIQUE constraint failed: tenants.name')), false);
+    assert.equal(isBusyError(null), false);
+    assert.equal(isBusyError(undefined), false);
+    assert.throws(() => addTenant('East'), (err) => /UNIQUE/i.test(err.message) && !isBusyError(err));
+  });
+
   it('enforces tenant boundaries in the schema itself', () => {
     const eastCourse = db.get("SELECT id FROM courses WHERE tenant_id = 1 AND title = 'Safety 101'").id;
     const westLearner = db.get("SELECT id FROM learners WHERE tenant_id = 2 AND full_name = 'Jordan Smith'").id;
@@ -243,6 +432,104 @@ describe('database layer', () => {
         /FOREIGN KEY/i,
       );
     }
+  });
+
+  it('refuses references to another tenant\'s enrollment, bulk operation or certificate', () => {
+    // East: Priya Sharma completed Safety 101 and has no certificate yet. West: one bulk operation
+    // and Alex Lee's certificate. Every statement below is valid except for the row it points at.
+    const east = db.get(
+      `SELECT e.id AS enrollmentId, e.course_id AS courseId, e.learner_id AS learnerId
+         FROM enrollments e JOIN learners l ON l.id = e.learner_id JOIN courses c ON c.id = e.course_id
+        WHERE e.tenant_id = 1 AND l.full_name = 'Priya Sharma' AND c.title = 'Safety 101'`,
+    );
+    const eastAdmin = db.get('SELECT id FROM admins WHERE tenant_id = 1').id;
+    const eastCertificate = db.get('SELECT id FROM certificates WHERE tenant_id = 1 ORDER BY id LIMIT 1').id;
+    const westEnrollment = db.get('SELECT id FROM enrollments WHERE tenant_id = 2 ORDER BY id LIMIT 1').id;
+    const westCertificate = db.get('SELECT id FROM certificates WHERE tenant_id = 2 ORDER BY id LIMIT 1').id;
+    const west = db.get('SELECT a.id AS adminId, c.id AS courseId FROM admins a, courses c WHERE a.tenant_id = 2 AND c.tenant_id = 2 LIMIT 1');
+
+    const insertOperation = (tenantId, adminId, courseId) =>
+      db.run(
+        `INSERT INTO bulk_issue_operations (tenant_id, actor_admin_id, course_id, request_hash, status, created_at)
+         VALUES (@tenantId, @adminId, @courseId, 'hash', 'running', '2026-01-01T00:00:00.000Z')`,
+        { tenantId, adminId, courseId },
+      ).lastInsertRowid;
+    const insertCertificate = ({ enrollmentId = null, operationId = null }) =>
+      db.run(
+        `INSERT INTO certificates (tenant_id, course_id, learner_id, enrollment_id, bulk_operation_id, serial_number,
+                                   learner_name, course_title, issued_at, issued_local_date)
+         VALUES (1, @courseId, @learnerId, @enrollmentId, @operationId, 'X-2', 'Priya Sharma', 'Safety 101',
+                 '2026-01-01T00:00:00.000Z', '2026-01-01')`,
+        { courseId: east.courseId, learnerId: east.learnerId, enrollmentId, operationId },
+      ).lastInsertRowid;
+    const insertAuditEvent = ({ certificateId, operationId = null }) =>
+      db.run(
+        `INSERT INTO audit_events (tenant_id, actor_admin_id, actor_email, action, certificate_id, bulk_operation_id, created_at)
+         VALUES (1, @adminId, 'alice@east.test', 'certificate.issued', @certificateId, @operationId, '2026-01-01T00:00:00.000Z')`,
+        { adminId: eastAdmin, certificateId, operationId },
+      );
+
+    class Undo extends Error {}
+    assert.throws(
+      () =>
+        db.transaction(() => {
+          const westOperation = insertOperation(2, west.adminId, west.courseId);
+          const eastOperation = insertOperation(1, eastAdmin, east.courseId);
+
+          assert.throws(() => insertCertificate({ enrollmentId: westEnrollment }), /FOREIGN KEY/i);
+          assert.throws(() => insertCertificate({ operationId: westOperation }), /FOREIGN KEY/i);
+          assert.throws(() => insertAuditEvent({ certificateId: westCertificate }), /FOREIGN KEY/i);
+          assert.throws(() => insertAuditEvent({ certificateId: eastCertificate, operationId: westOperation }), /FOREIGN KEY/i);
+          // moving a row to the other tenant is refused just the same
+          assert.throws(() => db.run('UPDATE certificates SET tenant_id = 2 WHERE id = @id', { id: eastCertificate }), /FOREIGN KEY/i);
+          assert.throws(() => db.run('UPDATE audit_events SET tenant_id = 2 WHERE certificate_id = @id', { id: eastCertificate }), /FOREIGN KEY/i);
+
+          // The same statements pointing at rows of the right tenant are accepted.
+          const certificateId = insertCertificate({ enrollmentId: east.enrollmentId, operationId: eastOperation });
+          insertAuditEvent({ certificateId, operationId: eastOperation });
+          throw new Undo();
+        }),
+      Undo,
+    );
+  });
+
+  it('refuses a database file written by another schema version', () => {
+    const old = openDatabase(path.join(dir, 'old-version.sqlite'));
+    try {
+      old.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+      assert.throws(() => migrate(old), /schema version \d+ is not supported.*db:reset/s);
+    } finally {
+      old.close();
+    }
+  });
+
+  it('does not create the schema twice when another process got there first', () => {
+    // Stand-in for two processes starting on a new file: this one still read "no schema yet"
+    // a moment before the other one finished creating it.
+    let staleReads = 0;
+    const racing = {
+      get(sql, params) {
+        if (sql === 'PRAGMA user_version' && staleReads === 0) {
+          staleReads += 1;
+          return { user_version: 0 };
+        }
+        return db.get(sql, params);
+      },
+      exec: (sql) => db.exec(sql),
+      transaction: (fn, options) => db.transaction(fn, options),
+    };
+    migrate(racing);
+    assert.equal(staleReads, 1);
+    assert.equal(db.get('PRAGMA user_version').user_version, SCHEMA_VERSION);
+    assert.equal(db.inTransaction, false);
+  });
+
+  it('initialising twice changes nothing', () => {
+    const count = () => db.get('SELECT (SELECT COUNT(*) FROM tenants) + (SELECT COUNT(*) FROM certificates) AS n').n;
+    const before = count();
+    migrate(db);
+    assert.equal(seedDemoData(db), false, 'data is already there');
+    assert.equal(count(), before);
   });
 
   it('allows at most one certificate per learner and course', () => {

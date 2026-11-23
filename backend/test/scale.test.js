@@ -5,10 +5,11 @@
  * server runs as its own process, so timings reflect what a client actually experiences.
  */
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
-import { openDatabase } from '../src/db/sqlite.js';
+import { isBusyError, openDatabase } from '../src/db/sqlite.js';
 import {
   ALICE,
   BOB,
@@ -28,6 +29,7 @@ const GENERATED = 100_000;
 const EAST_TOTAL = SEED.east.certificateCount + GENERATED;
 const TIME_LIMIT_MS = 60_000;
 const plain = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Every quick-start row, i.e. everything that is not flagged as generated. */
 function quickStartSnapshot(db) {
@@ -67,7 +69,9 @@ describe('A6 - 100,000-certificate export', { timeout: 300_000 }, () => {
 
     generatorOutput = await runScript('generate-certificates.js', ['--tenant', 'East', '--count', String(GENERATED), '--db', dbPath]);
 
-    server = await startServer(dbPath);
+    // Writes wait for the generator instead of giving up after the default 10 seconds: one test
+    // below re-runs it underneath the server, and how long that takes depends on the machine.
+    server = await startServer(dbPath, { env: { DB_BUSY_TIMEOUT_MS: '180000' } });
     alice = clientFor(server.baseUrl, ALICE);
     bob = clientFor(server.baseUrl, BOB);
 
@@ -314,6 +318,71 @@ describe('A6 - 100,000-certificate export', { timeout: 300_000 }, () => {
     assert.equal((await alice.get('/api/certificates?pageSize=1')).status, 200);
   });
 
+  it('requests keep flowing while the generator rewrites 100,000 rows; a write sent meanwhile completes afterwards', async (t) => {
+    const stored = await bob.bulkIssue(SEED.west.heights, 'before-generate');
+    assert.equal(stored.status, 201);
+    const eastTotal = (await alice.get('/api/certificates')).json.total;
+
+    const probe = openDatabase(dbPath);
+    let generating = true;
+    const generator = timed(() =>
+      runScript('generate-certificates.js', ['--tenant', 'East', '--count', String(GENERATED), '--db', dbPath]),
+    ).finally(() => {
+      generating = false;
+    });
+    generator.catch(() => {}); // awaited (and asserted on) below
+    try {
+      // The generator's whole run is one write transaction: wait until it has taken the lock.
+      let locked = false;
+      while (generating && !locked) {
+        locked = await probe.writeTransaction(() => false, { timeoutMs: 0 }).catch((err) => {
+          if (isBusyError(err)) return true;
+          throw err;
+        });
+        if (!locked) await sleep(5);
+      }
+      assert.equal(locked, true, 'the generator holds the write lock');
+
+      // A write - here in the other tenant - has to wait for the generator...
+      const issue = timed(() => bob.bulkIssue(SEED.west.safety101, 'during-generate'));
+      // ...but nothing else does: lists, details and replays of finished operations are answered throughout.
+      const latencies = [];
+      while (generating) {
+        const { value, ms } = await timed(() =>
+          Promise.all([
+            alice.get('/api/certificates?pageSize=25&sort=learner'),
+            alice.get(`/api/certificates/${SEED.east.alexLeeCertificate}`),
+            bob.get('/api/certificates'),
+            bob.bulkIssue(SEED.west.heights, 'before-generate'),
+          ]),
+        );
+        assert.deepEqual(value.map((r) => r.status), [200, 200, 200, 201]);
+        assert.equal(value[0].json.total, eastTotal, 'readers see either all of the old rows or all of the new ones');
+        assert.equal(value[3].text, stored.text);
+        latencies.push(ms);
+        await sleep(20);
+      }
+
+      const { ms: generatorMs } = await generator;
+      const issued = await issue;
+      assert.equal(issued.value.status, 201);
+      assert.equal(issued.value.headers.get('idempotent-replayed'), 'false');
+      assert.equal(issued.value.json.summary.issued, 2);
+
+      const worst = Math.max(...latencies);
+      t.diagnostic(
+        `generator ran for ${generatorMs.toFixed(0)} ms; ${latencies.length} rounds of 4 requests answered meanwhile, ` +
+          `slowest ${worst.toFixed(0)} ms; the waiting bulk issue completed after ${issued.ms.toFixed(0)} ms`,
+      );
+      assert.ok(latencies.length >= 5, 'requests were answered while the generator was running');
+      assert.ok(worst < 2_000, `slowest round took ${worst.toFixed(0)} ms`);
+      assert.equal((await alice.get('/api/certificates')).json.total, eastTotal);
+    } finally {
+      probe.close();
+      await generator.catch(() => {});
+    }
+  });
+
   it('re-running the generator replaces its previous rows; --clear removes them', async () => {
     const eastTotal = () => db.get('SELECT COUNT(*) AS n FROM certificates WHERE tenant_id = 1').n;
     const eastQuickStart = db.get(
@@ -331,5 +400,29 @@ describe('A6 - 100,000-certificate export', { timeout: 300_000 }, () => {
     assert.equal((await alice.get('/api/certificates')).json.total, eastQuickStart);
     assert.equal((await alice.get('/api/certificates?q=load%20test')).json.total, 0);
     assert.ok((await alice.get('/api/courses')).json.items.every((course) => !course.isGenerated));
+  });
+
+  it('db:reset underneath the running server restores the quick-start data and gives the disk space back', async (t) => {
+    await runScript('generate-certificates.js', ['--tenant', 'East', '--count', String(GENERATED), '--db', dbPath]);
+    const megabytes = (file) => (fs.existsSync(file) ? fs.statSync(file).size / 1024 / 1024 : 0);
+    const before = { database: megabytes(dbPath), wal: megabytes(`${dbPath}-wal`) };
+    assert.ok(before.database > 20, 'the load-test data takes real space');
+
+    const reset = await timed(() => runScript('init-db.js', ['--reset', '--db', dbPath]));
+    assert.match(reset.value, /Demo data restored/);
+
+    assert.deepEqual(quickStartSnapshot(db), before100k, 'row for row the dataset of a fresh install');
+    assert.equal(db.get('SELECT COUNT(*) AS n FROM certificates').n, SEED.east.certificateCount + SEED.west.certificateCount);
+    assert.equal(db.get('SELECT last_serial FROM tenants WHERE id = 1').last_serial, SEED.east.certificateCount);
+    assert.equal((await alice.get('/api/certificates')).json.total, SEED.east.certificateCount);
+    assert.equal((await alice.bulkIssue(SEED.east.safety101, 'after-reset')).json.summary.issued, 2, 'the server carries on with the fresh data');
+
+    const after = { database: megabytes(dbPath), wal: megabytes(`${dbPath}-wal`) };
+    t.diagnostic(
+      `reset took ${reset.ms.toFixed(0)} ms; database file ${before.database.toFixed(1)} MB -> ${after.database.toFixed(2)} MB, ` +
+        `write-ahead log ${before.wal.toFixed(1)} MB -> ${after.wal.toFixed(2)} MB`,
+    );
+    assert.ok(after.database < 2, `database file is ${after.database.toFixed(1)} MB after the reset`);
+    assert.ok(after.wal < 2, `write-ahead log is ${after.wal.toFixed(1)} MB after the reset`);
   });
 });

@@ -15,7 +15,10 @@ export function resolveUserPath(value, env = process.env) {
   return path.resolve(env.INIT_CWD || process.cwd(), value);
 }
 
-/** Runtime configuration, all optional: PORT, HOST, DB_PATH, STATIC_DIR, LOG_REQUESTS. */
+/**
+ * Runtime configuration, all optional: PORT, HOST, DB_PATH, STATIC_DIR, LOG_REQUESTS.
+ * (The database layer reads two more settings itself: SQLITE_DRIVER and DB_BUSY_TIMEOUT_MS.)
+ */
 export function loadConfig(env = process.env) {
   const port = env.PORT === undefined || env.PORT === '' ? 3000 : Number(env.PORT);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {

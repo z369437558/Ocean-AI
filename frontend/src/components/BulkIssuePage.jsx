@@ -279,9 +279,11 @@ export default function BulkIssuePage({ api, actor }) {
               </div>
               <div className="state-body">
                 <strong>
-                  {run.error.retryable
-                    ? `The bulk issue for ${run.attempt.courseTitle} may or may not have gone through`
-                    : `The bulk issue for ${run.attempt.courseTitle} was rejected`}
+                  {run.error.code === 'database_busy'
+                    ? `The bulk issue for ${run.attempt.courseTitle} has not run yet`
+                    : run.error.retryable
+                      ? `The bulk issue for ${run.attempt.courseTitle} may or may not have gone through`
+                      : `The bulk issue for ${run.attempt.courseTitle} was rejected`}
                 </strong>
                 <p>{run.error.message}</p>
                 {run.error.retryable ? (

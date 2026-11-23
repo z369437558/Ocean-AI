@@ -29,9 +29,9 @@ with the demo data (first run only) and starts the whole app on **http://localho
 npm test
 ```
 
-Runs the verification suite: 77 tests covering acceptance criteria A1–A7, including the
+Runs the verification suite: 105 tests covering acceptance criteria A1–A7, including the
 100,000-row export checks. It uses throw-away databases in the OS temp directory and never touches
-the app's data. Takes about 15 seconds.
+the app's data. Takes about 30 seconds.
 
 Other commands:
 
@@ -40,7 +40,7 @@ Other commands:
 | `npm run generate:east`               | Adds 100,000 certificates to tenant East (see [section 4](#4-load-test-data-100000-certificates)) |
 | `npm run generate:east -- --clear`    | Removes the generated certificates again                                     |
 | `npm run db:reset`                    | Restores the pristine quick-start dataset (safe while the server is running) |
-| `PORT=4000 npm start`                 | Use another port (`HOST`, `DB_PATH`, `LOG_REQUESTS=0` are also supported; PowerShell: `$env:PORT=4000; npm start`) |
+| `PORT=4000 npm start`                 | Use another port (`HOST`, `DB_PATH`, `LOG_REQUESTS=0`, `DB_BUSY_TIMEOUT_MS` are also supported; PowerShell: `$env:PORT=4000; npm start`) |
 | `npm run dev`                         | Development mode: API with auto-restart + Vite dev server on :5173           |
 
 Data lives in `data/cert-admin.sqlite` and survives restarts.
@@ -110,8 +110,13 @@ The generator **does not modify the quick-start dataset**. The generated certifi
 their own 10 generated courses and 10,000 generated learners (flagged `is_generated = 1`); the
 seeded tenants, admins, courses, learners, enrollments, certificates and audit events are left
 exactly as they were (asserted row by row in the test suite; only East's serial-number counter
-advances), so `Safety 101`, `Alex Lee` and every demo scenario behave as before. Re-running it replaces the previous generated set, so the count
-never piles up; `--clear` or `npm run db:reset` removes it.
+advances), so `Safety 101`, `Alex Lee` and every demo scenario behave as before. Re-running it
+replaces the previous generated set, so the count never piles up; `--clear` removes it, and
+`npm run db:reset` removes it and shrinks the database file back to its original size.
+
+The generator writes everything in one transaction. While it runs, a server on the same database
+keeps answering reads (which see the old rows until the generator commits) and retries of finished
+bulk issues; new writes wait for it and complete as soon as it is done.
 
 The data is built to contain many equal sort keys: ~2,500 distinct learner names for 100,000
 certificates, 10 course titles, ~150 certificates per calendar day, and batches of 25 certificates
@@ -121,7 +126,11 @@ PRNG, so every run produces the same rows.
 ## 5. HTTP API
 
 All endpoints except `/api/health` and `/api/actors` require `X-Actor-Email`. Errors have the shape
-`{"error": {"code": "...", "message": "..."}}`.
+`{"error": {"code": "...", "message": "..."}}`: `400` invalid input, `401` missing or unknown actor,
+`404` unknown id (including ids of another tenant), `409` idempotency key reused for a different
+request, `413` body larger than 100 kB, and `503` with `Retry-After` when another process has held
+the database's write lock for longer than `DB_BUSY_TIMEOUT_MS` (default 10 s) — nothing was
+written, so the request can simply be repeated.
 
 | Method & path                              | Purpose |
 | ------------------------------------------ | ------- |
@@ -194,19 +203,21 @@ quoting, `\n` line endings. Cells that would be interpreted as spreadsheet formu
 
 | # | Mechanism | Verified by (`backend/test`) |
 | - | --------- | ---------------------------- |
-| **A1** Tenant isolation | The tenant comes only from the actor record. Every query carries `tenant_id = <actor's tenant>`; ids of other tenants behave exactly like ids that do not exist (404, same body). A cross-tenant bulk issue fails validation before anything is written. Idempotency keys are scoped to (tenant, admin), so a key can never replay another tenant's response. On top of that the schema uses composite `(id, tenant_id)` foreign keys, so cross-tenant rows cannot even be inserted. | `acceptance.test.js` › *A1 – tenant isolation* (list, detail, bulk issue, export, revoke, operations, audit, key scoping) |
-| **A2** Retry safety | A bulk issue is **one** `BEGIN IMMEDIATE` transaction: look up the key → check eligibility → write certificates and audit events → store the response next to the key → commit. SQLite admits one writer at a time, so identical requests are serialised, also across processes; the first executes, all others replay the stored response byte for byte (`Idempotent-Replayed: true`). `UNIQUE (tenant_id, course_id, learner_id)` on certificates is the backstop. | *A2* › sequential retries, 25 concurrent requests, **two server processes on one database**, racing keys |
-| **A3** Key misuse | The request (method, route, canonical JSON body) is fingerprinted with SHA-256 and stored with the key. Same key + different fingerprint → `409 idempotency_key_reused`; the transaction ends without writing, and the first result stays as it was. | *A3* › different course, changed payload, reordered JSON (still a replay), concurrent misuse |
+| **A1** Tenant isolation | The tenant comes only from the actor record. Every query carries `tenant_id = <actor's tenant>`; ids of other tenants behave exactly like ids that do not exist (404, same body). A cross-tenant bulk issue fails validation before anything is written. Idempotency keys are scoped to (tenant, admin), so a key can never replay another tenant's response. On top of that every reference between tenant-owned tables is a composite `(id, tenant_id)` foreign key, so cross-tenant rows cannot even be inserted. | `acceptance.test.js` › *A1 – tenant isolation* (list, detail, bulk issue, export, revoke, operations, audit, key scoping); `unit.test.js` › *database layer* (the schema refuses every cross-tenant reference) |
+| **A2** Retry safety | A bulk issue is **one** `BEGIN IMMEDIATE` transaction: look up the key → check eligibility → write certificates and audit events → store the response next to the key → commit. SQLite admits one writer at a time, so identical requests are serialised, also across processes; the first executes, all others replay the stored response byte for byte (`Idempotent-Replayed: true`). A key that has already run is answered from a plain read, without queueing for the write lock. `UNIQUE (tenant_id, course_id, learner_id)` on certificates is the backstop. | *A2* › sequential retries, 25 concurrent requests, racing keys, and **two server processes on one database** whose requests are forced to overlap by a third connection holding the write lock |
+| **A3** Key misuse | The request (method, route, canonical JSON body) is fingerprinted with SHA-256 and stored with the key. Same key + different fingerprint → `409 idempotency_key_reused`; nothing is written, and the first result stays as it was. A body that cannot be read at all (malformed, oversized, unsupported encoding) is a different request too and gets the same 409 once its key has been used. | *A3* › different course, changed payload, reordered JSON (still a replay), unreadable bodies, deeply nested JSON, concurrent misuse (also across two servers) |
 | **A4** Learner outcomes | One classification function decides per roster row; the roster preview in the UI uses the same function. Each learner is issued inside a savepoint, so one failure becomes a `failed` outcome without undoing the others. | *A4* › outcomes on Safety 101, second run, revoked certificate, simulated failure |
 | **A5** DST & local date | Instants are stored in UTC. Local values are computed with the tenant's IANA zone through ICU (DST included). The tenant-local calendar date is stored with each certificate at issue time (`issued_local_date`) and is the leading sort key; the CSV prints the local wall-clock time. | `unit.test.js` › *time zones*; `acceptance.test.js` › *A5* (reference instant in both tenants, both 2026 DST transitions, UTC-date vs. local-date ordering) |
 | **A6** Export at scale | See [section 7](#7-design-notes). Every ordering ends in `id`, each is backed by an index, and the export streams from a dedicated read-only connection inside a single read snapshot, yielding to the event loop every 500 rows. | `scale.test.js` (100,000 generated rows; timings are printed) |
-| **A7** Revocation audit | `UPDATE … WHERE status = 'active'` and the audit insert share one transaction; the audit event is written only if the update changed a row. Repeats and races return 200 with `alreadyRevoked: true` and write nothing. | *A7* › single revoke, repeats, 12 concurrent revokes |
+| **A7** Revocation audit | `UPDATE … WHERE status = 'active'` and the audit insert share one transaction; the audit event is written only if the update changed a row. Repeats and races return 200 with `alreadyRevoked: true` and write nothing. | *A7* › single revoke, repeats, 12 concurrent revokes; *A2 – write lock* › the same revocation sent to two servers at once |
 
 Typical numbers from `npm test` on a 4-core container: filtered and sorted exports of 12,000–100,000
 rows take 0.1–0.4 s each and are byte-identical across runs; while three full 100,000-row exports
 stream concurrently, ~200 list requests are answered with a median of 5 ms and a worst case under
 30 ms; with a download deliberately stalled mid-export, list requests and a bulk issue still
-complete in milliseconds.
+complete in milliseconds; and while the generator rewrites all 100,000 rows underneath the running
+server (3–5 s), reads and replays keep being answered in under 30 ms and a bulk issue sent in the
+middle completes the moment the generator commits.
 
 ## 7. Design notes
 
@@ -216,6 +227,14 @@ transaction trivially atomic; cross-process correctness comes from `BEGIN IMMEDI
 constraints, not from the single process. The driver is `better-sqlite3`; if its native binary is
 unavailable the app automatically uses Node's built-in `node:sqlite` (Node ≥ 22.13). The suite
 passes on both.
+
+**Sharing the database with other processes.** The generator, `db:reset` or a second server may
+hold SQLite's write lock for a while. A request handler never sleeps inside SQLite waiting for it —
+that would freeze every other request of the process. The lock is only *tried*; while it is taken
+the request waits asynchronously (reads, replays and already-revoked answers are served as usual),
+and after `DB_BUSY_TIMEOUT_MS` (default 10 s) it gives up with `503` and `Retry-After`. Several
+processes may also start on a brand-new database file at the same moment: schema creation and
+seeding re-check under the write lock, so exactly one of them does the work.
 
 **Sorting and determinism.**
 
@@ -241,7 +260,7 @@ client disconnects, the snapshot and the connection are released (also tested).
 
 **Idempotency details.** `Idempotency-Key` is optional for API callers (the UI always sends one).
 Keys are 1–200 printable ASCII characters. A request that is rejected before execution (400, 404,
-409) stores nothing, so the key is not "burned" by a typo. Replays return the original status code
+409, 413, 503) stores nothing, so the key is not "burned" by a typo or a busy database. Replays return the original status code
 and body even if the data has changed since (for example, one of the issued certificates was
 revoked later).
 
@@ -272,7 +291,8 @@ backend/
   src/db/                  sqlite adapter, schema, demo seed, load-test generator
   src/lib/                 time zones, CSV, request fingerprint, parameter parsing
   scripts/                 init-db.js (--reset), generate-certificates.js
-  test/                    unit.test.js, acceptance.test.js (A1–A5, A7), scale.test.js (A6)
+  test/                    unit.test.js, acceptance.test.js (A1–A5, A7, start-up and maintenance
+                           commands), scale.test.js (A6)
 frontend/
   src/App.jsx              shell, actor switcher, hash routing
   src/components/          CertificatesPage, CertificateDetail (revoke dialog), BulkIssuePage, ui
@@ -283,9 +303,16 @@ docs/screenshots/          the images used in this README
 
 ## 9. Troubleshooting
 
-- **Port 3000 is in use** – `PORT=4000 npm start`.
-- **Want a clean slate** – `npm run db:reset` (works while the server runs), or stop the server and
-  delete `data/cert-admin.sqlite*`.
+- **Port 3000 is in use** – the server says so and exits; start it with `PORT=4000 npm start`.
+- **Want a clean slate** – `npm run db:reset`. It empties and re-seeds the tables in one
+  transaction, so it works while the server runs (the server simply serves the fresh data
+  afterwards). If it reports that the database is busy, another process is in the middle of a
+  write (for example the generator): nothing was changed, run it again in a moment.
+- **"Database schema version … is not supported"** – the database file was created by a different
+  version of this app. Stop the server and run `npm run db:reset`, which recreates the file.
+- **A request answers `503 database_busy`** – another process held the write lock for more than
+  10 seconds. Nothing was written; repeat the request (the UI offers *Retry safely*), or raise
+  the limit with `DB_BUSY_TIMEOUT_MS=60000 npm start`.
 - **`better-sqlite3` could not be installed** – nothing to do on Node ≥ 22.13: the server logs
   `(node:sqlite)` on startup and uses the built-in driver. `SQLITE_DRIVER=node` forces it.
 - **The app is reachable from other machines** – it listens on all interfaces by default so it also
@@ -296,7 +323,7 @@ docs/screenshots/          the images used in this README
 ## 中文速览
 
 - **启动**：`npm start`（自动安装依赖、构建前端、初始化演示数据并启动，访问 http://localhost:3000）
-- **验证测试**：`npm test`（77 项，覆盖验收标准 A1–A7，含 10 万行导出）
+- **验证测试**：`npm test`（105 项，覆盖验收标准 A1–A7，含 10 万行导出）
 - **生成 10 万条 East 证书**：`npm run generate:east`（不改动默认演示数据；`-- --clear` 可清除）
-- **恢复演示数据**：`npm run db:reset`
+- **恢复演示数据**：`npm run db:reset`（服务运行中也可执行）
 - **切换操作者**：页面右上角 *Acting as*，或在请求中带 `X-Actor-Email: alice@east.test` / `bob@west.test`

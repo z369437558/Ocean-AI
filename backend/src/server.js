@@ -1,5 +1,6 @@
 /** Entry point: initialise the database (schema + demo data on first run) and serve API + UI. */
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 
 import { createApp } from './app.js';
@@ -8,8 +9,24 @@ import { loadConfig } from './config.js';
 import { openDatabase } from './db/sqlite.js';
 import { ACTOR_HEADER, listActors } from './services/actors.js';
 
-const config = loadConfig();
-const db = openInitializedDatabase(config.dbPath, { log: console.log });
+/** Start-up problems are the operator's to fix: say what is wrong in one line, without a stack trace. */
+function exitWith(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+let config;
+let db;
+try {
+  config = loadConfig();
+} catch (err) {
+  exitWith(err.message);
+}
+try {
+  db = openInitializedDatabase(config.dbPath, { log: console.log });
+} catch (err) {
+  exitWith(`Could not open the database at ${config.dbPath}: ${err.message}`);
+}
 
 const app = createApp({
   db,
@@ -18,7 +35,19 @@ const app = createApp({
   logRequests: config.logRequests,
 });
 
-const server = app.listen(config.port, config.host, () => {
+// The error handler is attached before listen(): with app.listen() Express would hand a failed
+// bind (port already taken) to the "listening" callback instead.
+const server = http.createServer(app);
+
+server.on('error', (err) => {
+  db.close();
+  if (err.code === 'EADDRINUSE') {
+    exitWith(`Port ${config.port} is already in use. Stop the other process or run with PORT=<free port>.`);
+  }
+  exitWith(`Could not start the HTTP server: ${err.message}`);
+});
+
+server.listen(config.port, config.host, () => {
   const { port } = server.address();
   const hasFrontend = fs.existsSync(path.join(config.staticDir, 'index.html'));
   console.log(`Database: ${config.dbPath} (${db.driver})`);
@@ -26,15 +55,6 @@ const server = app.listen(config.port, config.host, () => {
   const actors = listActors(db).map((actor) => `${actor.email} (${actor.tenant.name})`);
   console.log(`Actors (${ACTOR_HEADER} header): ${actors.join(', ')}`);
   if (!hasFrontend) console.log('Note: frontend build not found - serving the API only.');
-});
-
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`Port ${config.port} is already in use. Stop the other process or run with PORT=<free port>.`);
-  } else {
-    console.error(err);
-  }
-  process.exit(1);
 });
 
 let shuttingDown = false;

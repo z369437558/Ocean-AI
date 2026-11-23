@@ -31,7 +31,11 @@ export function removeTempDir(dir) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-function runNode(args, { env = {} } = {}) {
+/**
+ * Runs a node entry point of the backend to completion: `{ code, output }` (stdout + stderr).
+ * A process that is still running after `timeoutMs` is killed and reported with `code: null`.
+ */
+function runNodeToExit(args, { env = {}, timeoutMs = 180_000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, {
       cwd: BACKEND_DIR,
@@ -39,19 +43,43 @@ function runNode(args, { env = {} } = {}) {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let output = '';
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
     child.stdout.on('data', (chunk) => (output += chunk));
     child.stderr.on('data', (chunk) => (output += chunk));
-    child.on('error', reject);
-    child.on('exit', (code) => {
-      if (code === 0) resolve(output);
-      else reject(new Error(`node ${args.join(' ')} exited with code ${code}\n${output}`));
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, output });
     });
   });
 }
 
-/** Runs a CLI script from backend/scripts and resolves with its combined output. */
-export function runScript(script, args = [], options) {
-  return runNode([path.join('scripts', script), ...args], options);
+/** Runs a CLI script from backend/scripts and resolves with its combined output; rejects on a non-zero exit. */
+export async function runScript(script, args = [], options) {
+  const { code, output } = await runScriptToExit(script, args, options);
+  if (code !== 0) throw new Error(`node scripts/${script} ${args.join(' ')} exited with code ${code}\n${output}`);
+  return output;
+}
+
+/** Like `runScript`, for scripts that are expected to fail: resolves with `{ code, output }`. */
+export function runScriptToExit(script, args = [], options) {
+  return runNodeToExit([path.join('scripts', script), ...args], options);
+}
+
+const serverEnv = (dbPath, env) => ({
+  PORT: '0',
+  DB_PATH: dbPath,
+  LOG_REQUESTS: '0',
+  STATIC_DIR: path.join(BACKEND_DIR, 'no-frontend'),
+  ...env,
+});
+
+/** For start-ups that are expected to fail: runs `src/server.js` until it exits, `{ code, output }`. */
+export function runServerToExit(dbPath, { env = {} } = {}) {
+  return runNodeToExit([path.join('src', 'server.js')], { env: serverEnv(dbPath, env), timeoutMs: 20_000 });
 }
 
 /** Starts `src/server.js` on a free port and resolves once it accepts requests. */
@@ -59,7 +87,7 @@ export function startServer(dbPath, { env = {} } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join('src', 'server.js')], {
       cwd: BACKEND_DIR,
-      env: { ...process.env, PORT: '0', DB_PATH: dbPath, LOG_REQUESTS: '0', STATIC_DIR: path.join(BACKEND_DIR, 'no-frontend'), ...env },
+      env: { ...process.env, ...serverEnv(dbPath, env) },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let output = '';
@@ -253,6 +281,19 @@ export function nocaseCompare(a, b) {
   const x = fold(a);
   const y = fold(b);
   return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/** Resolves to true when `promise` has neither fulfilled nor rejected after `ms` milliseconds. */
+export function stillPending(promise, ms) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(true), ms);
+  });
+  const settled = promise.then(
+    () => false,
+    () => false,
+  );
+  return Promise.race([settled, timeout]).finally(() => clearTimeout(timer));
 }
 
 export async function timed(fn) {

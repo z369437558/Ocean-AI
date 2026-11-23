@@ -2,12 +2,14 @@
  * Database schema.
  *
  * Tenant isolation is enforced twice: every query in the service layer is scoped by the actor's
- * tenant, and the schema itself refuses cross-tenant rows - child tables reference their parents
- * through composite `(id, tenant_id)` foreign keys, so a certificate in one tenant can never point
- * at a course, learner or admin of another.
+ * tenant, and the schema itself refuses cross-tenant rows - every reference between tenant-owned
+ * tables is a composite `(id, tenant_id)` foreign key, so a certificate in one tenant can never
+ * point at a course, learner, enrollment, admin or bulk operation of another, and an audit event
+ * can never point at another tenant's certificate.
  */
 
-const SCHEMA_VERSION = 1;
+/** Bump whenever SCHEMA_SQL changes; a database file from another version is refused at start-up. */
+export const SCHEMA_VERSION = 2;
 
 const SCHEMA_SQL = `
 CREATE TABLE tenants (
@@ -58,6 +60,7 @@ CREATE TABLE enrollments (
   completed_at TEXT,
   created_at   TEXT    NOT NULL,
   UNIQUE (tenant_id, course_id, learner_id),
+  UNIQUE (id, tenant_id),
   CHECK ((status = 'completed') = (completed_at IS NOT NULL)),
   FOREIGN KEY (course_id, tenant_id)  REFERENCES courses (id, tenant_id),
   FOREIGN KEY (learner_id, tenant_id) REFERENCES learners (id, tenant_id)
@@ -81,6 +84,7 @@ CREATE TABLE bulk_issue_operations (
   response_body    TEXT,
   created_at       TEXT    NOT NULL,
   completed_at     TEXT,
+  UNIQUE (id, tenant_id),
   FOREIGN KEY (actor_admin_id, tenant_id) REFERENCES admins (id, tenant_id),
   FOREIGN KEY (course_id, tenant_id)      REFERENCES courses (id, tenant_id)
 ) STRICT;
@@ -95,7 +99,7 @@ CREATE TABLE certificates (
   tenant_id           INTEGER NOT NULL,
   course_id           INTEGER NOT NULL,
   learner_id          INTEGER NOT NULL,
-  enrollment_id       INTEGER REFERENCES enrollments (id),
+  enrollment_id       INTEGER,
   serial_number       TEXT    NOT NULL UNIQUE,
   -- Names are snapshotted: a certificate is an issued document and must not change when the
   -- learner or course is renamed. It also keeps list/search/export free of joins.
@@ -107,17 +111,20 @@ CREATE TABLE certificates (
   -- "sort by issue date" is index-backed and follows the tenant-local calendar, not UTC.
   issued_local_date   TEXT    NOT NULL CHECK (issued_local_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
   issued_by_admin_id  INTEGER,
-  bulk_operation_id   INTEGER REFERENCES bulk_issue_operations (id),
+  bulk_operation_id   INTEGER,
   revoked_at          TEXT,
   revoked_by_admin_id INTEGER,
   revocation_reason   TEXT,
   -- At most one certificate per learner per course, ever. This is the last line of defence
   -- against double issuance, whatever the application layer does.
   UNIQUE (tenant_id, course_id, learner_id),
+  UNIQUE (id, tenant_id),
   CHECK ((status = 'revoked') = (revoked_at IS NOT NULL)),
   FOREIGN KEY (course_id, tenant_id)           REFERENCES courses (id, tenant_id),
   FOREIGN KEY (learner_id, tenant_id)          REFERENCES learners (id, tenant_id),
+  FOREIGN KEY (enrollment_id, tenant_id)       REFERENCES enrollments (id, tenant_id),
   FOREIGN KEY (issued_by_admin_id, tenant_id)  REFERENCES admins (id, tenant_id),
+  FOREIGN KEY (bulk_operation_id, tenant_id)   REFERENCES bulk_issue_operations (id, tenant_id),
   FOREIGN KEY (revoked_by_admin_id, tenant_id) REFERENCES admins (id, tenant_id)
 ) STRICT;
 -- One index per sort order, each ending in id: the deterministic tie-breaker for equal sort keys.
@@ -137,28 +144,35 @@ CREATE TABLE audit_events (
   actor_admin_id    INTEGER,
   actor_email       TEXT    NOT NULL,
   action            TEXT    NOT NULL CHECK (action IN ('certificate.issued', 'certificate.revoked')),
-  certificate_id    INTEGER NOT NULL REFERENCES certificates (id),
-  bulk_operation_id INTEGER REFERENCES bulk_issue_operations (id),
+  certificate_id    INTEGER NOT NULL,
+  bulk_operation_id INTEGER,
   details           TEXT    NOT NULL DEFAULT '{}',
   created_at        TEXT    NOT NULL,
-  FOREIGN KEY (actor_admin_id, tenant_id) REFERENCES admins (id, tenant_id)
+  FOREIGN KEY (actor_admin_id, tenant_id)    REFERENCES admins (id, tenant_id),
+  FOREIGN KEY (certificate_id, tenant_id)    REFERENCES certificates (id, tenant_id),
+  FOREIGN KEY (bulk_operation_id, tenant_id) REFERENCES bulk_issue_operations (id, tenant_id)
 ) STRICT;
 CREATE INDEX idx_audit_tenant      ON audit_events (tenant_id, id);
 CREATE INDEX idx_audit_certificate ON audit_events (certificate_id, id);
 CREATE INDEX idx_audit_bulk_op     ON audit_events (bulk_operation_id) WHERE bulk_operation_id IS NOT NULL;
 `;
 
+const readVersion = (db) => db.get('PRAGMA user_version').user_version;
+
 /** Creates the schema on an empty database; a no-op when it is already at the current version. */
 export function migrate(db) {
-  const { user_version: version } = db.get('PRAGMA user_version');
-  if (version === SCHEMA_VERSION) return;
-  if (version !== 0) {
-    throw new Error(
-      `Database schema version ${version} is not supported by this build (expected ${SCHEMA_VERSION}). ` +
-        'Run "npm run db:reset" to recreate the demo database.',
-    );
-  }
+  if (readVersion(db) === SCHEMA_VERSION) return;
   db.transaction(() => {
+    // Look again now that the write lock is held: another process starting at the same moment
+    // may have created the schema while this one was waiting.
+    const version = readVersion(db);
+    if (version === SCHEMA_VERSION) return;
+    if (version !== 0) {
+      throw new Error(
+        `Database schema version ${version} is not supported by this build (expected ${SCHEMA_VERSION}). ` +
+          'Stop the server and run "npm run db:reset" to recreate the demo database.',
+      );
+    }
     db.exec(SCHEMA_SQL);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   });

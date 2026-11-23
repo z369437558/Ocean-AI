@@ -53,37 +53,62 @@ function failureMessage(err) {
 }
 
 /**
+ * What an earlier request with this key left behind, if anything: its stored response when the
+ * payload is the same, a 409 when it is not. Keys are scoped to (tenant, admin), so one actor can
+ * never replay - or collide with - another actor's operation, let alone another tenant's.
+ * `requestHash` null means "this request has no readable payload", which can only be a mismatch.
+ */
+function answerFromStoredKey(db, actor, idempotencyKey, requestHash) {
+  if (idempotencyKey === null) return null;
+  const previous = db.get(
+    `SELECT id, request_hash, response_status, response_body
+       FROM bulk_issue_operations
+      WHERE tenant_id = @tenantId AND actor_admin_id = @adminId AND idempotency_key = @idempotencyKey`,
+    { tenantId: actor.tenantId, adminId: actor.adminId, idempotencyKey },
+  );
+  if (!previous) return null;
+  if (previous.request_hash !== requestHash) {
+    throw new HttpError(
+      409,
+      'idempotency_key_reused',
+      `${IDEMPOTENCY_HEADER} "${idempotencyKey}" was already used for a different request. ` +
+        'Retry with the original payload, or use a new key for a new operation.',
+      { operationId: previous.id },
+    );
+  }
+  return { status: previous.response_status, body: previous.response_body, replayed: true, operationId: previous.id };
+}
+
+/**
+ * For requests whose body could not even be parsed: if the key has already been used, this is a
+ * reuse with a different payload (409); otherwise the caller reports the body error itself.
+ */
+export function rejectReusedKeyWithUnreadableBody(db, actor, idempotencyKey) {
+  answerFromStoredKey(db, actor, idempotencyKey, null);
+}
+
+/**
  * Executes (or replays) a bulk issue.
  *
- * @returns {{ status: number, body: string, replayed: boolean, operationId: number }}
+ * @returns {Promise<{ status: number, body: string, replayed: boolean, operationId: number }>}
  *   `body` is the JSON text of the operation; replays return the stored text unchanged.
  */
-export function bulkIssue(db, actor, { body, idempotencyKey }, { now = () => new Date(), hooks = {}, logger = console } = {}) {
+export async function bulkIssue(db, actor, { body, idempotencyKey }, { now = () => new Date(), hooks = {}, logger = console } = {}) {
   const requestHash = requestFingerprint('POST', ROUTE, body);
 
-  return db.transaction(() => {
-    // 1. Idempotency lookup. Keys are scoped to (tenant, admin): one actor can never replay - or
-    //    collide with - another actor's operation, let alone another tenant's.
-    if (idempotencyKey !== null) {
-      const previous = db.get(
-        `SELECT id, request_hash, response_status, response_body
-           FROM bulk_issue_operations
-          WHERE tenant_id = @tenantId AND actor_admin_id = @adminId AND idempotency_key = @idempotencyKey`,
-        { tenantId: actor.tenantId, adminId: actor.adminId, idempotencyKey },
-      );
-      if (previous) {
-        if (previous.request_hash !== requestHash) {
-          throw new HttpError(
-            409,
-            'idempotency_key_reused',
-            `${IDEMPOTENCY_HEADER} "${idempotencyKey}" was already used for a different request. ` +
-              'Retry with the original payload, or use a new key for a new operation.',
-            { operationId: previous.id },
-          );
-        }
-        return { status: previous.response_status, body: previous.response_body, replayed: true, operationId: previous.id };
-      }
-    }
+  // Fast path: a key that already ran is answered from a plain read (replay or 409). It needs no
+  // write lock, so retries are served even while another process is in the middle of a long write.
+  const stored = answerFromStoredKey(db, actor, idempotencyKey, requestHash);
+  if (stored) return stored;
+
+  // Obviously invalid requests are turned away before queueing for the write lock as well.
+  if (!findCourse(db, actor, parseCourseId(body))) throw notFound('Course');
+
+  return db.writeTransaction(() => {
+    // 1. The decisive idempotency check, now under the write lock: an identical request that was
+    //    racing this one has either not started (we execute) or has committed (we replay).
+    const raced = answerFromStoredKey(db, actor, idempotencyKey, requestHash);
+    if (raced) return raced;
 
     // 2. Validation. Nothing has been written yet, so a rejected request leaves no trace: no
     //    operation row, no idempotency record, no certificates, no audit events.

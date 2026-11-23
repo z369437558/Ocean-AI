@@ -15,7 +15,37 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const BUSY_TIMEOUT_MS = 10_000;
+/**
+ * How long to wait for a lock held by another process (the load-test generator, a reset, a second
+ * server) before giving up: CLI scripts block for that long, request handlers wait asynchronously
+ * and then answer 503. DB_BUSY_TIMEOUT_MS overrides the default of 10 seconds.
+ */
+function lockWaitFromEnv(raw = process.env.DB_BUSY_TIMEOUT_MS) {
+  if (raw === undefined || raw.trim() === '') return 10_000;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0 || value > 600_000) {
+    throw new Error(`DB_BUSY_TIMEOUT_MS must be an integer between 0 and 600000 milliseconds (got "${raw}")`);
+  }
+  return value;
+}
+
+const LOCK_WAIT_MS = lockWaitFromEnv();
+const WAL_SIZE_LIMIT_BYTES = 16 * 1024 * 1024;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Blocks the thread briefly. Only used while a database is being opened, never while serving requests. */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** True when SQLite refused an operation because another connection holds the lock it needs. */
+export function isBusyError(err) {
+  if (!err) return false;
+  if (typeof err.code === 'string' && err.code.startsWith('SQLITE_BUSY')) return true; // better-sqlite3
+  if (typeof err.errcode === 'number' && (err.errcode & 0xff) === 5) return true; // node:sqlite (extended codes too)
+  return /database is locked/i.test(String(err.message ?? ''));
+}
 
 async function loadBetterSqlite() {
   const mod = await import('better-sqlite3');
@@ -199,6 +229,67 @@ export class Connection {
     return result;
   }
 
+  /**
+   * `transaction()` for request handlers: takes the write lock WITHOUT blocking the event loop.
+   *
+   * SQLite's own busy handler sleeps on the calling thread, which in Node is the thread that
+   * serves every request. If another process holds the write lock (the load-test generator, a
+   * reset, a second server), a plain BEGIN IMMEDIATE would therefore freeze all requests - reads
+   * included - until it gets the lock. Here the lock is only ever *tried*; while it is taken, the
+   * request waits asynchronously and the process keeps answering everything else. Once the lock is
+   * held, `fn` runs synchronously to COMMIT exactly as in `transaction()`.
+   */
+  async writeTransaction(fn, { timeoutMs = LOCK_WAIT_MS } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    let delay = 4;
+    for (;;) {
+      if (this.#depth !== 0) throw new Error('writeTransaction cannot start inside another transaction');
+      let wait;
+      this.exec('PRAGMA busy_timeout = 0'); // try once, do not sleep inside SQLite
+      try {
+        this.exec('BEGIN IMMEDIATE');
+        break;
+      } catch (err) {
+        const remaining = deadline - Date.now();
+        if (!isBusyError(err) || remaining <= 0) throw err;
+        wait = Math.min(delay, remaining); // the last attempt lands on the deadline
+      } finally {
+        this.exec(`PRAGMA busy_timeout = ${LOCK_WAIT_MS}`);
+      }
+      await sleep(wait);
+      delay = Math.min(delay * 2, 100);
+    }
+
+    this.#depth = 1;
+    let result;
+    try {
+      result = fn();
+      if (result && typeof result.then === 'function') {
+        throw new TypeError('Transaction callbacks must be synchronous');
+      }
+    } catch (err) {
+      this.#depth = 0;
+      try {
+        this.exec('ROLLBACK');
+      } catch {
+        // SQLite already rolled back on its own
+      }
+      throw err;
+    }
+    this.#depth = 0;
+    try {
+      this.exec('COMMIT');
+    } catch (err) {
+      try {
+        this.exec('ROLLBACK');
+      } catch {
+        // already rolled back
+      }
+      throw err;
+    }
+    return result;
+  }
+
   close() {
     if (!this.open) return;
     this.open = false;
@@ -227,15 +318,48 @@ export function openDatabase(file, { queryOnly = false } = {}) {
   }
 
   const connection = new Connection(driver.open(resolved), resolved);
-  connection.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+  connection.exec(`PRAGMA busy_timeout = ${LOCK_WAIT_MS}`);
   connection.exec('PRAGMA foreign_keys = ON');
   if (queryOnly) {
     connection.exec('PRAGMA query_only = ON');
   } else {
-    connection.exec('PRAGMA journal_mode = WAL');
+    try {
+      enableWal(connection);
+    } catch (err) {
+      connection.close();
+      throw err;
+    }
     connection.exec('PRAGMA synchronous = NORMAL');
+    // A large transaction (the load-test generator) grows the WAL file to its size; without a
+    // limit the file would stay that large for as long as any process keeps the database open.
+    connection.exec(`PRAGMA journal_size_limit = ${WAL_SIZE_LIMIT_BYTES}`);
   }
   return connection;
+}
+
+/**
+ * Switches the file to WAL journaling (a no-op once it is in that mode).
+ *
+ * The switch needs an exclusive lock on a brand-new file. When several processes open the same
+ * new file at the same moment, SQLite answers "busy" straight away instead of waiting - it cannot
+ * tell that situation from a deadlock - so the busy timeout does not help here. The losers simply
+ * try again: as soon as one process has made the switch, it succeeds for everyone else.
+ */
+export function enableWal(connection, { timeoutMs = LOCK_WAIT_MS } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (let delay = 5; ; delay = Math.min(delay * 2, 100)) {
+    let mode;
+    try {
+      mode = connection.get('PRAGMA journal_mode = WAL')?.journal_mode;
+      if (mode === 'wal') return;
+    } catch (err) {
+      if (!isBusyError(err) || Date.now() >= deadline) throw err;
+    }
+    if (mode !== undefined && Date.now() >= deadline) {
+      throw new Error(`Could not switch the database to WAL journaling (journal mode is "${mode}")`);
+    }
+    sleepSync(delay);
+  }
 }
 
 /** Deletes a database file together with its WAL side files. */

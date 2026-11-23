@@ -7,6 +7,7 @@ import { Readable, pipeline } from 'node:stream';
 
 import express from 'express';
 
+import { isBusyError } from './db/sqlite.js';
 import { HttpError } from './lib/errors.js';
 import { pathId } from './lib/params.js';
 import { ACTOR_HEADER, describeActor, listActors, requireActor } from './services/actors.js';
@@ -16,6 +17,7 @@ import {
   getBulkOperation,
   listBulkOperations,
   parseIdempotencyKey,
+  rejectReusedKeyWithUnreadableBody,
 } from './services/bulkIssue.js';
 import {
   buildExportPlan,
@@ -28,10 +30,6 @@ import {
   streamCsvExport,
 } from './services/certificates.js';
 import { getCourseRoster, listCourses } from './services/courses.js';
-
-function isDatabaseBusy(err) {
-  return err?.code === 'SQLITE_BUSY' || err?.errcode === 5 || /database is locked/i.test(err?.message ?? '');
-}
 
 /**
  * @param {object} deps
@@ -86,8 +84,26 @@ export function createApp({
 
   // Everything below runs on behalf of an admin and is scoped to that admin's tenant.
   api.use(requireActor(db));
+
   // Bodies are always JSON; do not make callers fail on a forgotten Content-Type header.
-  api.use(express.json({ limit: '100kb', type: () => true }));
+  const jsonBody = express.json({ limit: '100kb', type: () => true });
+
+  // Bulk issue: a body that cannot be read as JSON (malformed, too large, wrong encoding) is still
+  // "a different payload" once its Idempotency-Key has been used, so it gets the 409 that key
+  // misuse calls for rather than a 400/413. With an unused key the body error is reported as is.
+  function bulkIssueBody(req, res, next) {
+    jsonBody(req, res, (bodyError) => {
+      if (!bodyError) return next();
+      try {
+        rejectReusedKeyWithUnreadableBody(db, req.actor, parseIdempotencyKey(req.get(IDEMPOTENCY_HEADER)));
+      } catch (keyError) {
+        // 409 for a reused key. A malformed key (400) is no worse than the unreadable body, which
+        // is reported instead; anything else is a genuine failure and must not be papered over.
+        if (keyError.status !== 400) return next(keyError);
+      }
+      return next(bodyError);
+    });
+  }
 
   api.get('/me', (req, res) => {
     res.json(describeActor(req.actor));
@@ -146,13 +162,13 @@ export function createApp({
     res.json(getCertificate(db, req.actor, pathId(req.params.certificateId)));
   });
 
-  api.post('/certificates/:certificateId/revoke', (req, res) => {
-    res.json(revoke(db, req.actor, pathId(req.params.certificateId), req.body, { now }));
+  api.post('/certificates/:certificateId/revoke', jsonBody, async (req, res) => {
+    res.json(await revoke(db, req.actor, pathId(req.params.certificateId), req.body, { now }));
   });
 
-  api.post('/bulk-issues', (req, res) => {
+  api.post('/bulk-issues', bulkIssueBody, async (req, res) => {
     const idempotencyKey = parseIdempotencyKey(req.get(IDEMPOTENCY_HEADER));
-    const result = bulkIssue(db, req.actor, { body: req.body, idempotencyKey }, { now, hooks, logger });
+    const result = await bulkIssue(db, req.actor, { body: req.body, idempotencyKey }, { now, hooks, logger });
     res
       .status(result.status)
       .set({
@@ -218,7 +234,7 @@ export function createApp({
     } else if (err?.type === 'entity.too.large') {
       status = 413;
       payload = { code: 'payload_too_large', message: 'Request body is too large' };
-    } else if (isDatabaseBusy(err)) {
+    } else if (isBusyError(err)) {
       status = 503;
       res.set('Retry-After', '1');
       payload = { code: 'database_busy', message: 'The database is busy; retry the request shortly' };

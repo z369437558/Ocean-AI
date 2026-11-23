@@ -8,7 +8,7 @@ import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 
 import { csvRow } from '../lib/csv.js';
 import { badRequest, notFound } from '../lib/errors.js';
-import { queryInteger, queryString } from '../lib/params.js';
+import { assertPlainText, queryInteger, queryString } from '../lib/params.js';
 import { createLocalDateTimeFormatter, localDateTime, utcOffset } from '../lib/time.js';
 import { revokeCertificate } from './ledger.js';
 
@@ -79,7 +79,9 @@ export function parseListQuery(query, { paginate = true } = {}) {
     sortText = sortText.slice(1);
     order ??= 'desc';
   }
-  const sort = SORT_ALIASES[sortText.replace(/[^a-z]/g, '')];
+  // Object.hasOwn: a plain object also "has" constructor, toString, ... through its prototype.
+  const sortKey = sortText.replace(/[^a-z]/g, '');
+  const sort = Object.hasOwn(SORT_ALIASES, sortKey) ? SORT_ALIASES[sortKey] : undefined;
   if (!sort) throw badRequest(`"sort" must be one of: ${Object.keys(SORTS).join(', ')}`);
   order ||= DEFAULT_ORDER[sort];
   if (order !== 'asc' && order !== 'desc') throw badRequest('"order" must be "asc" or "desc"');
@@ -232,6 +234,7 @@ function parseRevocationReason(body) {
   const { reason } = body;
   if (reason === undefined || reason === null) return null;
   if (typeof reason !== 'string') throw badRequest('"reason" must be a string');
+  assertPlainText(reason, '"reason"', { allowLineBreaks: true });
   const text = reason.trim();
   if (text.length > MAX_REASON_LENGTH) throw badRequest(`"reason" must be at most ${MAX_REASON_LENGTH} characters`);
   return text || null;
@@ -241,18 +244,22 @@ function parseRevocationReason(body) {
  * Revokes a certificate. Idempotent: revoking an already revoked certificate succeeds, changes
  * nothing and writes no audit event (`alreadyRevoked: true` tells the caller it was a no-op).
  */
-export function revoke(db, actor, certificateId, body, { now = () => new Date() } = {}) {
+export async function revoke(db, actor, certificateId, body, { now = () => new Date() } = {}) {
   const reason = parseRevocationReason(body);
-  return db.transaction(() => {
-    const row =
-      certificateId === null
-        ? undefined
-        : db.get('SELECT id FROM certificates WHERE id = @certificateId AND tenant_id = @tenantId', {
-            certificateId,
-            tenantId: actor.tenantId,
-          });
-    if (!row) throw notFound('Certificate');
+  const current =
+    certificateId === null
+      ? undefined
+      : db.get('SELECT status FROM certificates WHERE id = @certificateId AND tenant_id = @tenantId', {
+          certificateId,
+          tenantId: actor.tenantId,
+        });
+  if (!current) throw notFound('Certificate');
 
+  // Already revoked: there is nothing to write, so do not queue for the write lock at all.
+  if (current.status === 'revoked') return { ...getCertificate(db, actor, certificateId), alreadyRevoked: true };
+
+  return db.writeTransaction(() => {
+    // The conditional UPDATE inside decides under the lock; a racing revoke simply finds nothing to change.
     const changed = revokeCertificate(db, {
       tenantId: actor.tenantId,
       certificateId,
@@ -289,7 +296,7 @@ export function listAuditEvents(db, actor, query) {
     clauses.push('bulk_operation_id = @bulkOperationId');
     params.bulkOperationId = bulkOperationId;
   }
-  const action = queryString(query, ['action']);
+  const action = queryString(query, ['action'], { maxLength: 64 });
   if (action) {
     clauses.push('action = @action');
     params.action = action;
