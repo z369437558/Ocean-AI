@@ -13,7 +13,7 @@
 import { parseArgs } from 'node:util';
 
 import { openInitializedDatabase } from '../src/bootstrap.js';
-import { loadConfig } from '../src/config.js';
+import { loadConfig, resolveUserPath } from '../src/config.js';
 import { clearGeneratedCertificates, generateCertificates } from '../src/db/generate.js';
 
 const { values } = parseArgs({
@@ -46,7 +46,7 @@ if (!Number.isInteger(seed)) {
   process.exit(1);
 }
 
-const dbPath = values.db ? loadConfig({ DB_PATH: values.db }).dbPath : loadConfig().dbPath;
+const dbPath = values.db ? resolveUserPath(values.db) : loadConfig().dbPath;
 const db = openInitializedDatabase(dbPath, { log: console.log });
 try {
   const started = performance.now();

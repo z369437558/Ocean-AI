@@ -8,6 +8,7 @@
  *
  * All timestamps are fixed, so a freshly seeded database is identical on every machine.
  */
+import { isValidTimeZone } from '../lib/time.js';
 import { issueCertificate, revokeCertificate } from '../services/ledger.js';
 
 export const DEMO_REFERENCE_INSTANT = '2026-01-10T13:30:00.000Z';
@@ -119,6 +120,7 @@ export function isSeeded(db) {
 }
 
 function insertDemoTenant(db, spec) {
+  if (!isValidTimeZone(spec.timezone)) throw new Error(`Unknown IANA time zone "${spec.timezone}" for tenant ${spec.name}`);
   const tenantId = db.run(
     'INSERT INTO tenants (name, code, timezone, created_at) VALUES (@name, @code, @timezone, @createdAt)',
     { name: spec.name, code: spec.code, timezone: spec.timezone, createdAt: SEEDED_AT },

@@ -11,7 +11,7 @@
 import { parseArgs } from 'node:util';
 
 import { openInitializedDatabase } from '../src/bootstrap.js';
-import { loadConfig } from '../src/config.js';
+import { loadConfig, resolveUserPath } from '../src/config.js';
 import { seedDemoData } from '../src/db/seed.js';
 import { openDatabase, removeDatabaseFiles } from '../src/db/sqlite.js';
 
@@ -19,7 +19,7 @@ const { values } = parseArgs({
   options: { reset: { type: 'boolean', default: false }, db: { type: 'string' } },
 });
 
-const dbPath = values.db ? loadConfig({ DB_PATH: values.db }).dbPath : loadConfig().dbPath;
+const dbPath = values.db ? resolveUserPath(values.db) : loadConfig().dbPath;
 
 // Children before parents, so foreign keys stay satisfied at every step.
 const TABLES_IN_DELETE_ORDER = [

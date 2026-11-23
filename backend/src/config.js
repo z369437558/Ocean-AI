@@ -7,6 +7,14 @@ export const REPO_ROOT = path.resolve(here, '..', '..');
 export const DEFAULT_DB_PATH = path.join(REPO_ROOT, 'data', 'cert-admin.sqlite');
 export const DEFAULT_STATIC_DIR = path.join(REPO_ROOT, 'frontend', 'dist');
 
+/**
+ * Relative paths mean "relative to where the command was typed". npm runs workspace scripts from
+ * the package folder, but records the original directory in INIT_CWD.
+ */
+export function resolveUserPath(value, env = process.env) {
+  return path.resolve(env.INIT_CWD || process.cwd(), value);
+}
+
 /** Runtime configuration, all optional: PORT, HOST, DB_PATH, STATIC_DIR, LOG_REQUESTS. */
 export function loadConfig(env = process.env) {
   const port = env.PORT === undefined || env.PORT === '' ? 3000 : Number(env.PORT);
@@ -16,8 +24,8 @@ export function loadConfig(env = process.env) {
   return {
     port,
     host: env.HOST || undefined, // undefined = all interfaces
-    dbPath: path.resolve(env.DB_PATH || DEFAULT_DB_PATH),
-    staticDir: path.resolve(env.STATIC_DIR || DEFAULT_STATIC_DIR),
+    dbPath: env.DB_PATH ? resolveUserPath(env.DB_PATH, env) : DEFAULT_DB_PATH,
+    staticDir: env.STATIC_DIR ? resolveUserPath(env.STATIC_DIR, env) : DEFAULT_STATIC_DIR,
     logRequests: env.LOG_REQUESTS !== '0',
   };
 }

@@ -27,7 +27,7 @@ export function useQuery(fetcher, deps) {
       },
     );
     return () => controller.abort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // The caller's `deps` decide when to refetch; the fetcher itself is always read from the ref.
   }, [...deps, attempt]);
 
   const reload = useCallback(() => setAttempt((n) => n + 1), []);

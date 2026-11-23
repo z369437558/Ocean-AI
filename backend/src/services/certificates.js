@@ -32,6 +32,19 @@ const SORTS = {
   status: (dir) => `c.status ${dir}, c.id ${dir}`,
 };
 
+/**
+ * The index that already stores each ordering. List and export name it explicitly (INDEXED BY),
+ * so SQLite always walks the index in order - it can stop after one page, and an export starts
+ * streaming immediately instead of first sorting the whole tenant, whatever the planner statistics say.
+ */
+const SORT_INDEXES = {
+  issued: 'idx_certificates_issued',
+  learner: 'idx_certificates_learner',
+  course: 'idx_certificates_course',
+  serial: 'idx_certificates_serial',
+  status: 'idx_certificates_status',
+};
+
 const SORT_ALIASES = {
   issued: 'issued',
   issuedat: 'issued',
@@ -97,15 +110,14 @@ function buildFilter(actor, { q, status }) {
     params.pattern = `%${escapeLike(q)}%`;
   }
   if (status !== 'all') {
-    // The unary plus keeps the planner on the index that matches the requested ORDER BY instead
-    // of switching to the low-selectivity status index and sorting the whole tenant in memory.
-    clauses.push('+c.status = @status');
+    clauses.push('c.status = @status');
     params.status = status;
   }
   return { where: clauses.join(' AND '), params };
 }
 
 const orderBy = ({ sort, order }) => SORTS[sort](order === 'desc' ? 'DESC' : 'ASC');
+const orderedSource = ({ sort }) => `certificates c INDEXED BY ${SORT_INDEXES[sort]}`;
 
 function presentListItem(row, timeZone) {
   return {
@@ -133,7 +145,7 @@ export function listCertificates(db, actor, options) {
       rows: db.all(
         `SELECT c.id, c.serial_number, c.learner_id, c.learner_name, c.course_id, c.course_title,
                 c.status, c.issued_at, c.issued_local_date
-           FROM certificates c
+           FROM ${orderedSource(options)}
           WHERE ${where}
           ORDER BY ${orderBy(options)}
           LIMIT @limit OFFSET @offset`,
@@ -310,7 +322,7 @@ export function buildExportPlan(actor, options) {
   const { where, params } = buildFilter(actor, options);
   return {
     sql: `SELECT c.learner_name, c.course_title, c.serial_number, c.issued_at
-            FROM certificates c
+            FROM ${orderedSource(options)}
            WHERE ${where}
            ORDER BY ${orderBy(options)}`,
     params,

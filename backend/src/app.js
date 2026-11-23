@@ -119,7 +119,8 @@ export function createApp({
       }
     }
     const chunks = exportChunks();
-    // Pull the header row first: if the export cannot even start, the client still gets a JSON error.
+    // Pull the first chunk (header + first rows) before committing to a 200: if the export cannot
+    // even start, the client still gets a proper JSON error instead of a truncated file.
     const first = await chunks.next();
 
     res.status(200).set({
@@ -185,7 +186,8 @@ export function createApp({
   if (indexHtml && fs.existsSync(indexHtml)) {
     app.use(express.static(staticDir, { index: false, maxAge: '1h' }));
     app.use((req, res, next) => {
-      if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+      const isPageRequest = (req.method === 'GET' || req.method === 'HEAD') && !path.extname(req.path);
+      if (!isPageRequest) return next(); // a missing asset stays a 404 instead of becoming HTML
       res.set('Cache-Control', 'no-cache');
       return res.sendFile(indexHtml);
     });
@@ -197,8 +199,8 @@ export function createApp({
     });
   }
 
-  // eslint-disable-next-line no-unused-vars
-  app.use((err, req, res, next) => {
+  // Express identifies error handlers by their four-parameter signature, so `_next` must stay.
+  app.use((err, req, res, _next) => {
     if (res.headersSent) {
       // Too late for an error document (streaming response): just drop the connection.
       res.destroy(err);

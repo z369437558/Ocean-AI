@@ -71,14 +71,6 @@ function findTenant(db, tenantName) {
   return { tenant, admin };
 }
 
-function countGenerated(db, tenantId) {
-  return db.get(
-    `SELECT COUNT(*) AS n FROM certificates
-      WHERE tenant_id = @tenantId AND course_id IN (SELECT id FROM courses WHERE tenant_id = @tenantId AND is_generated = 1)`,
-    { tenantId },
-  ).n;
-}
-
 function deleteGenerated(db, tenantId) {
   const params = { tenantId };
   const generatedCourses = 'SELECT id FROM courses WHERE tenant_id = @tenantId AND is_generated = 1';
@@ -251,5 +243,3 @@ export function generateCertificates(db, { tenantName, count = 100_000, seed = 2
     };
   });
 }
-
-export { countGenerated };
