@@ -99,7 +99,7 @@ export function Pagination({ page, totalPages, total, pageSize, itemCount, disab
  * Escape and a click on the backdrop close it (unless `locked`, e.g. while a request is running);
  * focus moves into the dialog on open and returns to the previously focused element on close.
  */
-export function Dialog({ title, onClose, locked = false, variant = 'modal', children, labelledBy }) {
+export function Dialog({ title, onClose, locked = false, variant = 'modal', children, labelledBy, describedBy }) {
   const panelRef = useRef(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -107,8 +107,9 @@ export function Dialog({ title, onClose, locked = false, variant = 'modal', chil
   lockedRef.current = locked;
 
   useEffect(() => {
+    const panel = panelRef.current;
     const previouslyFocused = document.activeElement;
-    panelRef.current?.focus();
+    panel?.focus();
     const onKeyDown = (event) => {
       if (event.key !== 'Escape' || lockedRef.current) return;
       // Only the top-most dialog reacts, so Escape closes the confirmation before the drawer.
@@ -121,7 +122,15 @@ export function Dialog({ title, onClose, locked = false, variant = 'modal', chil
     document.addEventListener('keydown', onKeyDown);
     return () => {
       document.removeEventListener('keydown', onKeyDown);
-      if (previouslyFocused instanceof HTMLElement && document.contains(previouslyFocused)) previouslyFocused.focus();
+      if (previouslyFocused instanceof HTMLElement && document.contains(previouslyFocused)) {
+        previouslyFocused.focus();
+        return;
+      }
+      // The element that opened this dialog no longer exists (the Revoke button of a certificate
+      // that is revoked now). The focus would then drop to <body>, behind a dialog that is still
+      // open, and the next Tab would leave it: hand the focus to the top-most remaining dialog.
+      const remaining = [...document.querySelectorAll('[role="dialog"]')].filter((dialog) => dialog !== panel);
+      remaining[remaining.length - 1]?.focus();
     };
   }, []);
 
@@ -139,6 +148,7 @@ export function Dialog({ title, onClose, locked = false, variant = 'modal', chil
         aria-modal="true"
         aria-label={labelledBy ? undefined : title}
         aria-labelledby={labelledBy}
+        aria-describedby={describedBy}
         tabIndex={-1}
       >
         {children}

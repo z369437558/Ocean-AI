@@ -15,18 +15,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { integerSetting } from '../config.js';
+
 /**
  * How long to wait for a lock held by another process (the load-test generator, a reset, a second
  * server) before giving up: CLI scripts block for that long, request handlers wait asynchronously
  * and then answer 503. DB_BUSY_TIMEOUT_MS overrides the default of 10 seconds.
  */
-function lockWaitFromEnv(raw = process.env.DB_BUSY_TIMEOUT_MS) {
-  if (raw === undefined || raw.trim() === '') return 10_000;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < 0 || value > 600_000) {
-    throw new Error(`DB_BUSY_TIMEOUT_MS must be an integer between 0 and 600000 milliseconds (got "${raw}")`);
-  }
-  return value;
+function lockWaitFromEnv(env = process.env) {
+  return integerSetting(env, 'DB_BUSY_TIMEOUT_MS', { fallback: 10_000, min: 0, max: 600_000, unit: 'milliseconds' });
 }
 
 // The two settings of this module are read when it loads, but a bad value must not make the import
@@ -91,7 +88,8 @@ async function loadNodeSqlite() {
 }
 
 async function resolveDriver() {
-  const preference = (process.env.SQLITE_DRIVER ?? 'auto').trim().toLowerCase();
+  // Unset or blank means "whichever loads", like every other setting that is left blank.
+  const preference = (process.env.SQLITE_DRIVER ?? '').trim().toLowerCase() || 'auto';
   const wantBetter = preference === 'auto' || preference === 'better-sqlite3';
   const wantNode = preference === 'auto' || preference === 'node' || preference === 'node:sqlite';
   if (!wantBetter && !wantNode) {

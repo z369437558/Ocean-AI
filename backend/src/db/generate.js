@@ -48,6 +48,9 @@ const REVOKED_SHARE = 0.02;
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
+/** Upper limit of one generator run (about 1.7 GB of database). */
+export const MAX_GENERATED_CERTIFICATES = 2_000_000;
+
 /** Small, fast, deterministic PRNG (mulberry32). */
 function createRandom(seed) {
   let state = seed >>> 0;
@@ -104,8 +107,8 @@ export function clearGeneratedCertificates(db, { tenantName }) {
  * Runs in a single transaction: other connections see either none or all of the new rows.
  */
 export function generateCertificates(db, { tenantName, count = 100_000, seed = 20260110 }) {
-  if (!Number.isInteger(count) || count < 1 || count > 2_000_000) {
-    throw new Error('count must be an integer between 1 and 2,000,000');
+  if (!Number.isInteger(count) || count < 1 || count > MAX_GENERATED_CERTIFICATES) {
+    throw new Error(`count must be an integer between 1 and ${MAX_GENERATED_CERTIFICATES.toLocaleString('en-US')}`);
   }
   const { tenant, admin } = findTenant(db, tenantName);
   const random = createRandom(seed);
@@ -115,28 +118,27 @@ export function generateCertificates(db, { tenantName, count = 100_000, seed = 2
     const replaced = deleteGenerated(db, tenant.id);
 
     // Courses and learners -----------------------------------------------------------------
-    const courses = COURSE_TITLES.map((title) => ({
-      title,
-      titleKey: foldText(title),
-      id: db.run(
-        'INSERT INTO courses (tenant_id, title, is_generated, created_at) VALUES (@tenantId, @title, 1, @createdAt)',
-        { tenantId: tenant.id, title, createdAt },
-      ).lastInsertRowid,
-    }));
+    const courses = COURSE_TITLES.map((title) => {
+      const titleKey = foldText(title);
+      const id = db.run(
+        `INSERT INTO courses (tenant_id, title, title_key, is_generated, created_at)
+         VALUES (@tenantId, @title, @titleKey, 1, @createdAt)`,
+        { tenantId: tenant.id, title, titleKey, createdAt },
+      ).lastInsertRowid;
+      return { id, title, titleKey };
+    });
 
     const learnerCount = Math.ceil(count / courses.length);
     const learners = new Array(learnerCount);
     for (let i = 0; i < learnerCount; i += 1) {
       const name = `${FIRST_NAMES[Math.floor(random() * FIRST_NAMES.length)]} ${LAST_NAMES[Math.floor(random() * LAST_NAMES.length)]}`;
-      learners[i] = {
-        name,
-        nameKey: foldText(name),
-        id: db.run(
-          `INSERT INTO learners (tenant_id, full_name, email, is_generated, created_at)
-           VALUES (@tenantId, @name, @email, 1, @createdAt)`,
-          { tenantId: tenant.id, name, email: `learner${i + 1}@loadtest.${tenant.name.toLowerCase()}.test`, createdAt },
-        ).lastInsertRowid,
-      };
+      const nameKey = foldText(name);
+      const id = db.run(
+        `INSERT INTO learners (tenant_id, full_name, name_key, email, is_generated, created_at)
+         VALUES (@tenantId, @name, @nameKey, @email, 1, @createdAt)`,
+        { tenantId: tenant.id, name, nameKey, email: `learner${i + 1}@loadtest.${tenant.name.toLowerCase()}.test`, createdAt },
+      ).lastInsertRowid;
+      learners[i] = { id, name, nameKey };
     }
 
     // Issue instants: sorted batch timestamps, each shared by ~25 certificates -----------------

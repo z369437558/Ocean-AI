@@ -15,12 +15,17 @@ export function resolveUserPath(value, env = process.env) {
   return path.resolve(env.INIT_CWD || process.cwd(), value);
 }
 
-function integerSetting(env, name, { fallback, min, max }) {
+/**
+ * A whole number from the environment, written in plain decimal digits ("3000", not "3e3" or
+ * "0xBB8"). Unset or blank means the fallback; anything else that cannot be used is an Error with
+ * a one-line message.
+ */
+export function integerSetting(env, name, { fallback, min, max, unit = '' }) {
   const raw = env[name];
   if (raw === undefined || raw.trim() === '') return fallback;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < min || value > max) {
-    throw new Error(`${name} must be an integer between ${min} and ${max} (got "${raw}")`);
+  const value = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
+  if (!(value >= min && value <= max)) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}${unit && ` ${unit}`} (got "${raw}")`);
   }
   return value;
 }
@@ -41,7 +46,7 @@ export function loadConfig(env = process.env) {
     logRequests: env.LOG_REQUESTS !== '0',
     // CSV exports reading at the same time; further requests wait for a free slot.
     maxConcurrentExports: integerSetting(env, 'EXPORT_MAX_CONCURRENT', { fallback: 4, min: 1, max: 64 }),
-    // A download whose client accepts no data for this long is dropped (0 = never).
-    exportIdleTimeoutMs: integerSetting(env, 'EXPORT_IDLE_TIMEOUT_MS', { fallback: 30_000, min: 0, max: 3_600_000 }),
+    // A download that makes no progress for this long is dropped (0 = never).
+    exportIdleTimeoutMs: integerSetting(env, 'EXPORT_IDLE_TIMEOUT_MS', { fallback: 300_000, min: 0, max: 3_600_000 }),
   };
 }

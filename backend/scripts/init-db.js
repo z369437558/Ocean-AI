@@ -37,9 +37,10 @@ try {
 } catch (err) {
   fail(`${err.message}\n${USAGE}`);
 }
+if (values.db !== undefined && values.db.trim() === '') fail(`--db needs a path (got an empty value)\n${USAGE}`);
 try {
   checkDatabaseSettings(); // SQLITE_DRIVER, DB_BUSY_TIMEOUT_MS
-  dbPath = values.db ? resolveUserPath(values.db) : loadConfig().dbPath;
+  dbPath = values.db !== undefined ? resolveUserPath(values.db) : loadConfig().dbPath;
 } catch (err) {
   fail(err.message);
 }
@@ -104,7 +105,7 @@ if (values.reset && fs.existsSync(dbPath)) {
   if (outcome === 'done' || outcome === 'done-not-compacted') {
     console.log(`Demo data restored in ${dbPath}`);
     if (outcome === 'done-not-compacted') {
-      console.log('(A download or another connection still reads the old data; the files shrink once it has finished.)');
+      console.log('(A download or another connection still reads the old data; the files shrink with the next writes after it has finished.)');
     }
     process.exit(0);
   }

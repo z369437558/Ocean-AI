@@ -15,7 +15,7 @@
     "prestart": "node scripts/preflight.mjs",
     "start": "npm install --include=dev --no-audit --no-fund && npm run build --workspace frontend && npm run start --workspace backend",
     "pretest": "node scripts/preflight.mjs",
-    "test": "npm install --include=dev --no-audit --no-fund && npm run test --workspace backend",
+    "test": "npm install --include=dev --no-audit --no-fund && npm run test --workspace backend && npm run test --workspace frontend",
     "serve": "npm run start --workspace backend",
     "build": "npm run build --workspace frontend",
     "dev": "node scripts/dev.mjs",

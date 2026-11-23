@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import { createApi, fetchActors } from './api.js';
+import { createBulkIssueStore } from './bulkIssueStore.js';
 import BulkIssuePage from './components/BulkIssuePage.jsx';
 import CertificatesPage from './components/CertificatesPage.jsx';
+import ErrorBoundary from './components/ErrorBoundary.jsx';
 import { ErrorState, Spinner } from './components/ui.jsx';
 import { navigate, useHashRoute, useQuery } from './hooks.js';
 
@@ -24,10 +26,14 @@ function storeActor(email) {
   }
 }
 
-export default function App() {
+function Console() {
   const actors = useQuery((signal) => fetchActors(signal), []);
   const [selectedEmail, setSelectedEmail] = useState(readStoredActor);
   const route = useHashRoute();
+  // Bulk-issue attempts outlive the Bulk issue page: leaving the tab while a request is pending
+  // must not drop its lock, its status or its idempotency key. The store also brings back, from
+  // the tab's sessionStorage, attempts that a reload interrupted (see bulkIssueStore.js).
+  const [bulkIssues] = useState(() => createBulkIssueStore());
 
   const actor = useMemo(() => {
     if (!actors.data?.length) return null;
@@ -101,14 +107,24 @@ export default function App() {
         </div>
       </header>
 
-      {/* Keyed by actor: switching tenants discards every piece of page state (search, selection, results). */}
+      {/* Keyed by actor: switching tenants discards every piece of page state (search, selection,
+          viewed results) and cancels an export in flight. Only bulk-issue attempts are kept, per
+          actor, in the store above; the page of another actor never reads them. */}
       <main className="content" key={actor.email}>
         {route.view === 'bulk-issue' ? (
-          <BulkIssuePage api={api} actor={actor} />
+          <BulkIssuePage api={api} actor={actor} bulkIssues={bulkIssues} />
         ) : (
           <CertificatesPage api={api} actor={actor} selectedCertificateId={route.certificateId} />
         )}
       </main>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <Console />
+    </ErrorBoundary>
   );
 }

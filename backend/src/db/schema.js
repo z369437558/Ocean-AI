@@ -9,7 +9,7 @@
  */
 
 /** Bump whenever SCHEMA_SQL changes; a database file from another version is refused at start-up. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const SCHEMA_SQL = `
 CREATE TABLE tenants (
@@ -30,10 +30,14 @@ CREATE TABLE admins (
   UNIQUE (id, tenant_id)
 ) STRICT;
 
+-- Names are stored twice: as written, and folded for search and sort (case and accents removed,
+-- see lib/text.js). SQLite itself only folds ASCII letters, so the folding is done once, in the
+-- application, when the row is written; every ordering by name uses the folded column.
 CREATE TABLE courses (
   id           INTEGER PRIMARY KEY,
   tenant_id    INTEGER NOT NULL REFERENCES tenants (id),
   title        TEXT    NOT NULL CHECK (length(trim(title)) > 0),
+  title_key    TEXT    NOT NULL,                                           -- folded title
   is_generated INTEGER NOT NULL DEFAULT 0 CHECK (is_generated IN (0, 1)),  -- 1 = load-test data
   created_at   TEXT    NOT NULL,
   UNIQUE (tenant_id, title),
@@ -44,6 +48,7 @@ CREATE TABLE learners (
   id           INTEGER PRIMARY KEY,
   tenant_id    INTEGER NOT NULL REFERENCES tenants (id),
   full_name    TEXT    NOT NULL CHECK (length(trim(full_name)) > 0),
+  name_key     TEXT    NOT NULL,                                           -- folded full_name
   email        TEXT,
   is_generated INTEGER NOT NULL DEFAULT 0 CHECK (is_generated IN (0, 1)),
   created_at   TEXT    NOT NULL,
@@ -105,8 +110,7 @@ CREATE TABLE certificates (
   -- learner or course is renamed. It also keeps list/search/export free of joins.
   learner_name        TEXT    NOT NULL CHECK (length(trim(learner_name)) > 0),
   course_title        TEXT    NOT NULL CHECK (length(trim(course_title)) > 0),
-  -- The same two names folded for search and sort (case and accents removed, see lib/text.js).
-  -- SQLite itself only folds ASCII letters, so the folding is done once, when the row is written.
+  -- The same two names folded for search and sort, like courses.title_key and learners.name_key.
   learner_name_key    TEXT    NOT NULL,
   course_title_key    TEXT    NOT NULL,
   status              TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),

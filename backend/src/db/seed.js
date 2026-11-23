@@ -8,6 +8,7 @@
  *
  * All timestamps are fixed, so a freshly seeded database is identical on every machine.
  */
+import { foldText } from '../lib/text.js';
 import { isValidTimeZone } from '../lib/time.js';
 import { issueCertificate, revokeCertificate } from '../services/ledger.js';
 
@@ -115,6 +116,9 @@ const DEMO_TENANTS = [
   },
 ];
 
+/** The tenants every new database starts with. */
+export const DEMO_TENANT_NAMES = Object.freeze(DEMO_TENANTS.map((tenant) => tenant.name));
+
 export function isSeeded(db) {
   return db.get('SELECT COUNT(*) AS n FROM tenants').n > 0;
 }
@@ -136,10 +140,12 @@ function insertDemoTenant(db, spec) {
   const learners = new Map();
   for (const name of spec.learners) {
     const id = db.run(
-      'INSERT INTO learners (tenant_id, full_name, email, created_at) VALUES (@tenantId, @name, @email, @createdAt)',
+      `INSERT INTO learners (tenant_id, full_name, name_key, email, created_at)
+       VALUES (@tenantId, @name, @nameKey, @email, @createdAt)`,
       {
         tenantId,
         name,
+        nameKey: foldText(name),
         email: `${name.toLowerCase().normalize('NFD').replace(/[^a-z ]/g, '').trim().replace(/ +/g, '.')}@${spec.name.toLowerCase()}.test`,
         createdAt: SEEDED_AT,
       },
@@ -150,8 +156,8 @@ function insertDemoTenant(db, spec) {
   const pendingCertificates = [];
   for (const courseSpec of spec.courses) {
     const courseId = db.run(
-      'INSERT INTO courses (tenant_id, title, created_at) VALUES (@tenantId, @title, @createdAt)',
-      { tenantId, title: courseSpec.title, createdAt: SEEDED_AT },
+      'INSERT INTO courses (tenant_id, title, title_key, created_at) VALUES (@tenantId, @title, @titleKey, @createdAt)',
+      { tenantId, title: courseSpec.title, titleKey: foldText(courseSpec.title), createdAt: SEEDED_AT },
     ).lastInsertRowid;
     const course = { id: courseId, title: courseSpec.title };
 

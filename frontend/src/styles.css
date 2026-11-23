@@ -277,6 +277,19 @@ a:focus-visible {
   outline-offset: 1px;
 }
 
+/* A heading that a script moved the focus to ("View outcomes" for the result already on screen).
+   Marked for everyone, also after a mouse click, which :focus-visible would leave unmarked: here
+   the outline is the feedback that the click did something. */
+h2[tabindex='-1']:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: 4px;
+  border-radius: 2px;
+}
+
+summary {
+  cursor: pointer;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -681,6 +694,11 @@ th[aria-sort='descending'] .sort-arrow {
 
 .dialog-modal {
   width: min(520px, 100%);
+  /* Never taller than the screen (less the overlay's padding): on a short viewport the middle of
+     the dialog scrolls instead of the title and the buttons being pushed out of reach. */
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
   border-radius: var(--radius);
 }
 
@@ -697,6 +715,18 @@ th[aria-sort='descending'] .sort-arrow {
   display: flex;
   flex-direction: column;
   gap: 0.9rem;
+  min-height: 0; /* may get shorter than its content; .dialog-scroll gives way */
+}
+
+.dialog-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  min-height: 0;
+  overflow-y: auto;
+  /* A scroll container clips what sticks out of it; this keeps the focus ring of the fields whole. */
+  margin: -4px;
+  padding: 4px;
 }
 
 .dialog-actions {

@@ -52,9 +52,9 @@ const ROSTER_SQL = `
     LEFT JOIN certificates c
            ON c.tenant_id = e.tenant_id AND c.course_id = e.course_id AND c.learner_id = e.learner_id
    WHERE e.tenant_id = @tenantId AND e.course_id = @courseId
-   ORDER BY l.full_name COLLATE NOCASE, l.id`;
+   ORDER BY l.name_key, l.id`;
 
-/** Every enrollment of a course with its certificate (if any), in a stable order. */
+/** Every enrollment of a course with its certificate (if any), by learner name (case and accents ignored), then id. */
 export function loadRoster(db, tenantId, courseId) {
   return db.all(ROSTER_SQL, { tenantId, courseId });
 }
@@ -73,7 +73,7 @@ export function listCourses(db, actor) {
   return db
     .all(
       `SELECT id, title, is_generated FROM courses WHERE tenant_id = @tenantId
-        ORDER BY is_generated, title COLLATE NOCASE, id`,
+        ORDER BY is_generated, title_key, id`,
       { tenantId: actor.tenantId },
     )
     .map((row) => ({ id: row.id, title: row.title, isGenerated: row.is_generated === 1 }));

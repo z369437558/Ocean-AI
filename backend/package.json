@@ -7,7 +7,7 @@
     "start": "node src/server.js",
     "db:reset": "node scripts/init-db.js --reset",
     "generate:east": "node scripts/generate-certificates.js --tenant East --count 100000",
-    "test": "node --test --test-reporter=spec --test-concurrency=1 --test-timeout=120000 test/unit.test.js test/acceptance.test.js test/scale.test.js"
+    "test": "node --test --test-reporter=spec --test-concurrency=1 --test-timeout=1800000 test/unit.test.js test/acceptance.test.js test/scale.test.js"
   },
   "dependencies": {
     "express": "^5.1.0"

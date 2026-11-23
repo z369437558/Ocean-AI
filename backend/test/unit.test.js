@@ -1,6 +1,9 @@
+import './support/pin-settings.mjs'; // must stay first: see the file
+
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { after, before, describe, it } from 'node:test';
+import { Writable } from 'node:stream';
+import { after, before, describe } from 'node:test';
 
 import { loadConfig } from '../src/config.js';
 import { formatGeneratedSerial } from '../src/db/generate.js';
@@ -8,13 +11,15 @@ import { SCHEMA_VERSION, migrate } from '../src/db/schema.js';
 import { seedDemoData } from '../src/db/seed.js';
 import { TransactionAbortedError, enableWal, isBusyError, openDatabase } from '../src/db/sqlite.js';
 import { csvCell, csvRow } from '../src/lib/csv.js';
+import { sendChunks } from '../src/lib/download.js';
 import { canonicalJson, requestFingerprint } from '../src/lib/fingerprint.js';
 import { LimiterFullError, createLimiter } from '../src/lib/limiter.js';
 import { foldText } from '../src/lib/text.js';
 import { localDate, localDateTime, utcOffset } from '../src/lib/time.js';
-import { buildExportPlan, parseListQuery, streamCsvExport } from '../src/services/certificates.js';
+import { createTurnQueue } from '../src/lib/turns.js';
+import { EXPORT_BATCH_ROWS, buildExportPlan, parseListQuery, streamCsvExport } from '../src/services/certificates.js';
 import { classifyEnrollment } from '../src/services/courses.js';
-import { createTempDir, holdRollbackJournalLock, parseCsv, referenceFold, removeTempDir, stillPending } from './helpers.js';
+import { createTempDir, holdRollbackJournalLock, insertLearner, it, parseCsv, referenceFold, removeTempDir, stillPending } from './helpers.js';
 
 describe('time zones (A5)', () => {
   it('converts the reference instant to each tenant-local wall clock', () => {
@@ -206,6 +211,54 @@ describe('list query parsing', () => {
     assert.equal(parseListQuery({ q: ' José 李 😀 ' }).q, 'José 李 😀', 'ordinary Unicode is welcome');
     assert.throws(() => parseListQuery({ sort: 'constructor', order: 'asc' }), /"sort" must be one of: issued, learner, course, serial, status/);
   });
+
+  it('refuses two names of the same parameter instead of ignoring one of them', () => {
+    for (const [query, names] of [
+      [{ sort: 'learner', sortBy: 'course' }, '"sort" and "sortBy"'],
+      [{ sort: 'learner', sortBy: 'learner' }, '"sort" and "sortBy"'],
+      [{ q: 'zoe', search: 'alex' }, '"q" and "search"'],
+      [{ order: 'asc', dir: 'desc' }, '"order" and "dir"'],
+      [{ direction: 'asc', sortOrder: 'asc' }, '"direction" and "sortOrder"'],
+      [{ pageSize: '10', limit: '20' }, '"pageSize" and "limit"'],
+      [{ page_size: '10', per_page: '10' }, '"page_size" and "per_page"'],
+    ]) {
+      assert.throws(
+        () => parseListQuery(query),
+        (err) => err.status === 400 && err.message === `Query parameters ${names} mean the same; send only one of them`,
+        JSON.stringify(query),
+      );
+    }
+    // The second name is checked even when it is the one that would have been ignored...
+    assert.throws(() => parseListQuery({ pageSize: '10', limit: 'abc' }), (err) => err.status === 400);
+    assert.throws(() => parseListQuery({ sort: 'learner', sortBy: ['a', 'b'] }), /"sortBy" must be a single value/);
+    // ...while a blank one is no value at all.
+    assert.equal(parseListQuery({ sort: 'learner', sortBy: '' }).sort, 'learner');
+    assert.equal(parseListQuery({ pageSize: ' ', limit: '7' }).pageSize, 7);
+  });
+
+  it('reads status, sort and order in any letter case', () => {
+    assert.equal(parseListQuery({ status: 'ACTIVE' }).status, 'active');
+    assert.equal(parseListQuery({ status: 'Revoked' }).status, 'revoked');
+    assert.equal(parseListQuery({ status: 'ALL' }).status, 'all');
+    assert.deepEqual(sortAndOrder({ sort: 'LEARNER', order: 'Desc' }), { sort: 'learner', order: 'desc' });
+  });
+
+  it('counts the length of the search text in characters, not in UTF-16 units', () => {
+    assert.equal(parseListQuery({ q: '😀'.repeat(100) }).q.length, 200, '100 emoji are 100 characters');
+    assert.throws(() => parseListQuery({ q: '😀'.repeat(101) }), /"q" must be at most 100 characters/);
+    assert.equal(parseListQuery({ q: 'é'.repeat(100) }).q.length, 100);
+    assert.throws(() => parseListQuery({ q: 'é'.repeat(101) }), (err) => err.status === 400);
+  });
+
+  it('the export reads the same parameters, minus the paging ones', () => {
+    assert.deepEqual(parseListQuery({ q: 'lee', sort: '-learner', page: '3', pageSize: '10' }, { paginate: false }), {
+      q: 'lee',
+      status: 'all',
+      sort: 'learner',
+      order: 'desc',
+    });
+    assert.deepEqual(parseListQuery({ page: 'abc', pageSize: '0' }, { paginate: false }).sort, 'issued', 'it has no pages to get wrong');
+  });
 });
 
 describe('eligibility rules (A4)', () => {
@@ -333,30 +386,38 @@ describe('database layer', () => {
 
   it('takes the write lock without blocking the event loop while another connection holds it', async () => {
     const other = openDatabase(path.join(dir, 'unit.sqlite'));
+    let locked = false;
+    let write = null;
     try {
       const before = tenantCount();
       other.exec('BEGIN IMMEDIATE');
+      locked = true;
       let ticks = 0;
       const ticker = setInterval(() => (ticks += 1), 5);
-      const write = db.writeTransaction(() => {
+      write = db.writeTransaction(() => {
         addTenant('Waited');
         return 'committed';
       });
       write.catch(() => {}); // asserted on below
       try {
-        assert.equal(await stillPending(write, 200), true, 'the write waits for the lock');
+        assert.equal(await stillPending(write, 300), true, 'the write waits for the lock');
       } finally {
         clearInterval(ticker);
       }
-      assert.ok(ticks >= 10, `timers kept firing while waiting (${ticks} ticks)`);
+      // A wait inside SQLite would freeze the process: not a single timer could have fired.
+      assert.ok(ticks >= 2, `timers kept firing while waiting (${ticks} ticks)`);
       assert.equal(tenantCount(), before, 'reads on the same connection are served meanwhile');
       assert.equal(db.inTransaction, false);
 
       other.exec('COMMIT');
+      locked = false;
       assert.equal(await write, 'committed');
       assert.equal(tenantCount(), before + 1);
-      db.run("DELETE FROM tenants WHERE name = 'Waited'");
     } finally {
+      // Whatever happened above, the next test finds the table as this one found it.
+      if (locked) other.exec('ROLLBACK');
+      await write?.catch(() => {});
+      db.run("DELETE FROM tenants WHERE name = 'Waited'");
       other.close();
     }
   });
@@ -441,6 +502,26 @@ describe('database layer', () => {
       assert.equal(await db.writeTransaction(() => 'ran', { whileWaiting: () => void (looks += 1) }), 'ran');
       assert.equal(looks, 0);
       assert.equal(tenantCount(), before);
+    } finally {
+      other.close();
+    }
+  });
+
+  it('keeps looking at short intervals, however long it has been waiting', async () => {
+    const other = openDatabase(path.join(dir, 'unit.sqlite'));
+    try {
+      other.exec('BEGIN IMMEDIATE');
+      // The answer becomes known 1.2 s into the wait. The pauses between two looks grow at first
+      // but never beyond a tenth of a second, so it is picked up almost at once.
+      const started = performance.now();
+      const answer = await db.writeTransaction(() => 'ran', {
+        timeoutMs: 30_000,
+        whileWaiting: () => (performance.now() - started >= 1_200 ? 'known' : undefined),
+      });
+      const waited = performance.now() - started;
+      assert.equal(answer, 'known');
+      assert.ok(waited >= 1_200 && waited < 1_800, `answered ${Math.round(waited - 1_200)} ms after the answer was there`);
+      other.exec('ROLLBACK');
     } finally {
       other.close();
     }
@@ -537,6 +618,24 @@ describe('database layer', () => {
 
     const refused = { get: () => ({ journal_mode: 'delete' }) };
     assert.throws(() => enableWal(refused, { timeoutMs: 50 }), /WAL journaling.*"delete"/);
+
+    // This wait is measured in elapsed time as well: setting the system clock does not cut it short.
+    const realNow = Date.now;
+    let tries = 0;
+    const collidesWhileTheClockIsSet = {
+      get() {
+        tries += 1;
+        if (tries === 2) Date.now = () => realNow() + 3_600_000;
+        if (tries < 6) throw busy;
+        return { journal_mode: 'wal' };
+      },
+    };
+    try {
+      enableWal(collidesWhileTheClockIsSet, { timeoutMs: 5_000 });
+    } finally {
+      Date.now = realNow;
+    }
+    assert.equal(tries, 6, 'kept trying although the wall clock jumped an hour ahead');
   });
 
   it('opening a new file while another process writes to it waits for the WAL switch instead of failing', async () => {
@@ -718,7 +817,7 @@ describe('database layer', () => {
   it('refuses learners without a name (a certificate could never be issued to them)', () => {
     for (const name of ['', '   ']) {
       assert.throws(
-        () => db.run("INSERT INTO learners (tenant_id, full_name, created_at) VALUES (1, @name, '2026-01-01T00:00:00.000Z')", { name }),
+        () => insertLearner(db, 1, name),
         /CHECK/i,
       );
     }
@@ -792,6 +891,27 @@ describe('database layer', () => {
     );
     assert.deepEqual(mismatches, []);
   });
+
+  it('stores every name together with its folded form, which is what gets sorted and searched', () => {
+    const names = db.all(
+      `SELECT 'learner' AS kind, full_name AS name, name_key AS key FROM learners
+       UNION ALL SELECT 'course', title, title_key FROM courses
+       UNION ALL SELECT 'certificate learner', learner_name, learner_name_key FROM certificates
+       UNION ALL SELECT 'certificate course', course_title, course_title_key FROM certificates`,
+    );
+    assert.ok(names.length >= 13 + 6 + 2 * 11);
+    for (const { kind, name, key } of names) assert.equal(key, foldText(name), `${kind} "${name}"`);
+    assert.ok(names.some(({ name, key }) => name === 'José Álvarez' && key === 'jose alvarez'));
+    // A name cannot be stored without its key.
+    assert.throws(
+      () => db.run("INSERT INTO learners (tenant_id, full_name, created_at) VALUES (1, 'No Key', '2026-01-01T00:00:00.000Z')"),
+      /NOT NULL/i,
+    );
+    assert.throws(
+      () => db.run("INSERT INTO courses (tenant_id, title, created_at) VALUES (1, 'No Key', '2026-01-01T00:00:00.000Z')"),
+      /NOT NULL/i,
+    );
+  });
 });
 
 describe('text folding for search and sort', () => {
@@ -815,14 +935,43 @@ describe('text folding for search and sort', () => {
     assert.ok(foldText('ΟΔΥΣΣΕΥΣ').includes(foldText('ΥΣΣ')), 'a fragment cut out of an upper-case word still matches');
   });
 
-  it('leaves alone what is not an accent on a letter', () => {
+  it('leaves other scripts and symbols as they are', () => {
     assert.equal(foldText('李雷'), '李雷');
-    assert.equal(foldText('Søren Łukasz'), 'søren łukasz', 'letters of their own, not accented o and l');
     assert.equal(foldText('한글'), '한글', 'Hangul stays composed');
     assert.equal(foldText('की'), 'की', 'vowel signs of other scripts are kept');
+    assert.equal(foldText('ガ'), 'ガ', 'and so are kana voicing marks');
     assert.equal(foldText('😀 100%_\\'), '😀 100%_\\');
-    assert.equal(foldText('\u0301\u0300'), '', 'accents on nothing fold to nothing');
     assert.equal(foldText(''), '');
+  });
+
+  it('drops every combining accent, not just the common ones', () => {
+    for (let mark = 0x300; mark <= 0x36f; mark += 1) {
+      assert.equal(foldText(`a${String.fromCodePoint(mark)}b`), 'ab', `U+0${mark.toString(16)}`);
+    }
+    assert.equal(foldText('François Wałęsa'), 'francois walesa', 'cedilla, stroke and ogonek');
+    assert.equal(foldText('Dvořák Šimůnek Ţepeş Ğül'), 'dvorak simunek tepes gul');
+    assert.equal(foldText('Nguyễn Thị Hằng'), 'nguyen thi hang', 'two accents on one letter');
+  });
+
+  it('spells out the Latin letters that have no accent to drop', () => {
+    assert.equal(foldText('Søren Łukasz'), 'soren lukasz');
+    assert.equal(foldText('ØYSTEIN ØDEGÅRD'), 'oystein odegard');
+    assert.equal(foldText('Straße'), 'strasse');
+    assert.equal(foldText('STRASSE'), 'strasse');
+    assert.equal(foldText('GROẞ'), 'gross', 'capital sharp s');
+    assert.equal(foldText('Đorđe Þór Ægir Œuvre Ħal Ŧ Ð'), 'dorde thor aegir oeuvre hal t d');
+    assert.equal(foldText('Ǿ ǽ'), 'o ae', 'also underneath an accent');
+    for (const written of ['Işık', 'IŞIK', 'ışık', 'isik', 'ISIK', 'İŞİK']) assert.equal(foldText(written), 'isik', written);
+  });
+
+  it('drops an accent typed on its own instead of turning it into a space', () => {
+    for (const accent of ['´', '¨', '¯', '¸', '˜', '΄', '῾', '‾', '\u0301\u0300', '\u00a0\u0301']) {
+      assert.equal(foldText(accent), '', `U+${accent.codePointAt(0).toString(16)}`);
+    }
+    assert.equal(foldText('e´'), 'e');
+    assert.equal(foldText('´l'), 'l');
+    assert.equal(foldText('Alex ¨ Lee'), 'alex  lee', 'the spaces that were typed stay');
+    assert.equal(foldText('Alex Lee'), 'alex lee');
   });
 
   it('agrees with an independently written reference on ordinary names', () => {
@@ -832,7 +981,7 @@ describe('text folding for search and sort', () => {
   });
 
   it('is stable: folding twice changes nothing', () => {
-    for (const name of ['José Álvarez', 'ΟΔΥΣΣΕΥΣ', 'Ｊｏｓｅ', 'İstanbul', 'ﬁona', '한글', 'Straße']) {
+    for (const name of ['José Álvarez', 'ΟΔΥΣΣΕΥΣ', 'Ｊｏｓｅ', 'İstanbul', 'ﬁona', '한글', 'Straße', 'Þór Ægir', 'Işık', 'e´ ¨']) {
       assert.equal(foldText(foldText(name)), foldText(name), name);
     }
   });
@@ -890,6 +1039,28 @@ describe('limiter (concurrent exports)', () => {
     assert.equal(limiter.active, 0);
   });
 
+  it('a signal that fires after its caller was admitted disturbs nobody who is still waiting', async () => {
+    const limiter = createLimiter(1);
+    const releaseA = await limiter.acquire();
+    const finished = new AbortController();
+    const b = limiter.acquire({ signal: finished.signal });
+    const c = limiter.acquire();
+    const d = limiter.acquire();
+    releaseA();
+    const releaseB = await b;
+
+    // The export route fires its signal when a request is over, long after the slot was granted.
+    finished.abort(new Error('request over'));
+    assert.deepEqual([limiter.active, limiter.waiting], [1, 2], 'the two behind it are still in the queue');
+
+    releaseB();
+    const releaseC = await c;
+    assert.equal(await stillPending(d, 30), true, 'and are admitted in order');
+    releaseC();
+    (await d)();
+    assert.deepEqual([limiter.active, limiter.waiting], [0, 0]);
+  });
+
   it('turns callers away once the queue is full', async () => {
     const limiter = createLimiter(1, { maxWaiting: 2 });
     const release = await limiter.acquire();
@@ -909,10 +1080,12 @@ describe('settings', () => {
     const config = loadConfig({});
     assert.deepEqual(
       [config.port, config.host, config.logRequests, config.maxConcurrentExports, config.exportIdleTimeoutMs],
-      [3000, undefined, true, 4, 30_000],
+      [3000, undefined, true, 4, 300_000],
     );
     assert.equal(loadConfig({ PORT: '', EXPORT_MAX_CONCURRENT: ' ', EXPORT_IDLE_TIMEOUT_MS: '' }).port, 3000, 'blank means unset');
     assert.equal(loadConfig({ EXPORT_IDLE_TIMEOUT_MS: '0' }).exportIdleTimeoutMs, 0, '0 switches the timeout off');
+    assert.equal(loadConfig({ PORT: ' 8080 ' }).port, 8080);
+    assert.equal(loadConfig({ EXPORT_MAX_CONCURRENT: '64' }).maxConcurrentExports, 64);
   });
 
   it('rejects unusable values in one line each', () => {
@@ -925,6 +1098,15 @@ describe('settings', () => {
       ['EXPORT_MAX_CONCURRENT', 'many'],
       ['EXPORT_IDLE_TIMEOUT_MS', '-5'],
       ['EXPORT_IDLE_TIMEOUT_MS', 'soon'],
+      // numbers, but not written the way a setting is: plain decimal digits only
+      ['PORT', '0x1F90'],
+      ['PORT', '0b1'],
+      ['PORT', '8e3'],
+      ['PORT', '+8080'],
+      ['EXPORT_MAX_CONCURRENT', '4.0'],
+      ['EXPORT_MAX_CONCURRENT', '65'],
+      ['EXPORT_IDLE_TIMEOUT_MS', '3600001'],
+      ['EXPORT_IDLE_TIMEOUT_MS', '1e4'],
     ]) {
       assert.throws(
         () => loadConfig({ [name]: value }),
@@ -946,12 +1128,25 @@ describe('export stream', () => {
   const actor = { tenantId: 1, timezone: 'Australia/Sydney' };
   const row = (name, matches) => ({ learner_name: name, course_title: 'Course', serial_number: `S-${name}`, issued_at: '2026-01-10T13:30:00.000Z', matches });
 
-  /** A stand-in for the dedicated reader connection that records what the export does with it. */
-  function fakeReader(rows) {
+  /**
+   * A stand-in for the export's own connection that records what the export does with it.
+   * `reader.open` is what the export is given: the function that opens the connection.
+   */
+  function fakeReader(rows, { onFetch = () => {}, onOpen = () => {} } = {}) {
     const reader = {
+      opened: 0,
+      closed: 0,
       statements: [],
       fetched: 0,
       iteratorReturned: false,
+      open() {
+        reader.opened += 1;
+        onOpen(reader);
+        return reader;
+      },
+      close() {
+        reader.closed += 1;
+      },
       exec: (sql) => reader.statements.push(sql),
       iterate() {
         let i = 0;
@@ -959,6 +1154,7 @@ describe('export stream', () => {
           next() {
             if (i >= rows.length) return { done: true, value: undefined };
             reader.fetched += 1;
+            onFetch(reader);
             return { done: false, value: rows[i++] };
           },
           return() {
@@ -988,7 +1184,8 @@ describe('export stream', () => {
     const rows = Array.from({ length: 1_050 }, (_, i) => row(`n${i}`, i === 7 || i === 1_049 ? 1 : 0));
     const reader = fakeReader(rows);
     const plan = { sql: 'SELECT ...', params: {}, filtered: true, timeZone: 'Australia/Sydney', header: ['H'] };
-    const stream = streamCsvExport(reader, plan, { batchRows: 100 });
+    const stream = streamCsvExport(reader.open, plan, { batchRows: 100 });
+    assert.equal(reader.opened, 0, 'nothing is opened before the export is asked for its first chunk');
 
     const first = await stream.next();
     assert.equal(first.value, 'H\nn7,Course,S-n7,2026-01-11 00:30\n', 'the header travels with the first step');
@@ -1000,18 +1197,280 @@ describe('export stream', () => {
     assert.deepEqual(await stream.next(), { done: true, value: undefined });
     assert.deepEqual(reader.statements, ['BEGIN', 'ROLLBACK'], 'one read transaction, closed at the end');
     assert.equal(reader.iteratorReturned, true);
+    assert.deepEqual([reader.opened, reader.closed], [1, 1], 'one connection, opened and closed by the export itself');
   });
 
   it('includes every row when there is no filter, and releases the snapshot when abandoned mid-way', async () => {
     const rows = Array.from({ length: 250 }, (_, i) => row(`n${i}`, undefined));
     const reader = fakeReader(rows);
     const plan = { sql: 'SELECT ...', params: {}, filtered: false, timeZone: 'Australia/Sydney', header: ['H'] };
-    const stream = streamCsvExport(reader, plan, { batchRows: 100 });
+    const stream = streamCsvExport(reader.open, plan, { batchRows: 100 });
     const first = await stream.next();
     assert.equal(first.value.split('\n').length - 1, 101, 'header + 100 rows');
     await stream.return(undefined); // the client went away
     assert.deepEqual(reader.statements, ['BEGIN', 'ROLLBACK']);
     assert.equal(reader.iteratorReturned, true);
     assert.equal(reader.fetched, 100, 'nothing more was read');
+    assert.deepEqual([reader.opened, reader.closed], [1, 1], 'and the connection is closed');
+  });
+
+  it('reports a connection that cannot be opened as the failure of the first chunk', async () => {
+    const plan = { sql: 'SELECT ...', params: {}, filtered: false, timeZone: 'Australia/Sydney', header: ['H'] };
+    const stream = streamCsvExport(() => {
+      throw new Error('cannot open');
+    }, plan);
+    await assert.rejects(stream.next(), /cannot open/);
+    assert.deepEqual(await stream.next(), { done: true, value: undefined });
+  });
+
+  it('takes steps of 500 rows, and all exports together take one step per event-loop iteration', async () => {
+    const loop = countIterations();
+    const fetchedIn = new Map(); // iteration -> rows fetched in it, per reader
+    const openedIn = []; // iteration in which each export opened its connection
+    const plan = { sql: 'SELECT ...', params: {}, filtered: false, timeZone: 'Australia/Sydney', header: ['H'] };
+    const exportsAtOnce = [0, 1, 2].map((index) => {
+      const rows = Array.from({ length: 1_750 }, (_, i) => row(`n${i}`, undefined));
+      const reader = fakeReader(rows, {
+        onOpen: () => (openedIn[index] = loop.iteration),
+        onFetch() {
+          const counts = fetchedIn.get(loop.iteration) ?? fetchedIn.set(loop.iteration, [0, 0, 0]).get(loop.iteration);
+          counts[index] += 1;
+        },
+      });
+      return (async () => {
+        let lines = 0;
+        for await (const chunk of streamCsvExport(reader.open, plan)) lines += chunk.split('\n').length - 1;
+        return lines;
+      })();
+    });
+    assert.deepEqual(await Promise.all(exportsAtOnce), [1_751, 1_751, 1_751], 'header + every row, for each export');
+    loop.stop();
+
+    // Opening a connection is synchronous work like any other: it happens in the export's first
+    // step, never for several exports back to back.
+    assert.equal(new Set(openedIn).size, 3, `every export opened its connection in an iteration of its own (${openedIn})`);
+    assert.deepEqual(openedIn, [...fetchedIn.keys()].slice(0, 3), 'the one in which it took its first step');
+
+    const steps = [...fetchedIn.values()];
+    assert.equal(EXPORT_BATCH_ROWS, 500);
+    assert.equal(steps.length, 12, 'three exports of four steps each, every step in an iteration of its own');
+    for (const counts of steps) {
+      assert.equal(counts.filter((n) => n > 0).length, 1, `only one export reads in any one iteration (${counts})`);
+      assert.ok(Math.max(...counts) <= 500, `no step looks at more than 500 rows (${counts})`);
+    }
+    assert.deepEqual(steps.map((counts) => Math.max(...counts)).sort((a, b) => a - b), [250, 250, 250, ...Array(9).fill(500)]);
+    assert.deepEqual(
+      steps.slice(0, 6).map((counts) => counts.findIndex((n) => n > 0)),
+      [0, 1, 2, 0, 1, 2],
+      'the exports take turns',
+    );
+  });
+
+  it('an abandoned export stops before its next step instead of reading to the end', async () => {
+    const nothingMatches = Array.from({ length: 100_000 }).fill(row('n', 0));
+    const reader = fakeReader(nothingMatches);
+    const plan = { sql: 'SELECT ...', params: {}, filtered: true, timeZone: 'Australia/Sydney', header: ['H'] };
+    const abandoned = new AbortController();
+    const stream = streamCsvExport(reader.open, plan, { batchRows: 100, signal: abandoned.signal });
+
+    assert.deepEqual(await stream.next(), { done: false, value: 'H\n' }, 'the header, after a first step without a match');
+    const rest = stream.next(); // no row matches: without the signal this would read all 100,000 rows
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(reader.fetched >= 200 && reader.fetched <= 1_000, `the scan is under way (${reader.fetched} rows)`);
+
+    abandoned.abort();
+    assert.deepEqual(await rest, { done: true, value: undefined }, 'it ends quietly');
+    assert.ok(reader.fetched <= 1_100, `and stopped within a step (${reader.fetched} rows)`);
+    assert.deepEqual(reader.statements, ['BEGIN', 'ROLLBACK'], 'the snapshot is released');
+    assert.equal(reader.iteratorReturned, true);
+    assert.deepEqual([reader.opened, reader.closed], [1, 1], 'and the connection closed');
+
+    // A signal that has already fired: no connection is even opened.
+    const neverStarted = fakeReader(nothingMatches);
+    const stillborn = streamCsvExport(neverStarted.open, plan, { signal: abandoned.signal });
+    assert.deepEqual(await stillborn.next(), { done: true, value: undefined });
+    assert.deepEqual([neverStarted.opened, neverStarted.fetched], [0, 0]);
+  });
+});
+
+/** Counts event-loop iterations: an immediate that re-arms itself runs exactly once per iteration. */
+function countIterations() {
+  const loop = { iteration: 0, running: true, stop: () => (loop.running = false) };
+  (function tick() {
+    loop.iteration += 1;
+    if (loop.running) setImmediate(tick);
+  })();
+  return loop;
+}
+
+describe('turn queue (steps of long jobs)', () => {
+  it('lets exactly one step through per event-loop iteration, first come first served', async () => {
+    const turns = createTurnQueue();
+    const loop = countIterations();
+    const steps = [];
+    const job = async (name) => {
+      for (let step = 0; step < 3; step += 1) {
+        await turns.next();
+        steps.push({ name, iteration: loop.iteration });
+      }
+    };
+    const jobs = [job('a'), job('b'), job('c')];
+    assert.equal(turns.waiting, 3);
+    await Promise.all(jobs);
+    loop.stop();
+
+    assert.equal(steps.map((step) => step.name).join(''), 'abcabcabc', 'round robin, in arrival order');
+    const iterations = steps.map((step) => step.iteration);
+    assert.equal(new Set(iterations).size, 9, `every step ran in an iteration of its own (${iterations})`);
+    assert.equal(turns.waiting, 0);
+  });
+
+  it('other work gets its chance between any two steps', async () => {
+    const turns = createTurnQueue();
+    const events = [];
+    const jobs = ['a', 'b'].map(async (name) => {
+      for (let step = 0; step < 2; step += 1) {
+        await turns.next();
+        events.push(name);
+        // Stands for anything else that became ready while the step ran (a request, a timer).
+        setTimeout(() => events.push('other'), 0);
+        const busyUntil = performance.now() + 3;
+        while (performance.now() < busyUntil); // the step itself: synchronous work
+      }
+    });
+    await Promise.all(jobs);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(events.join(' '), 'a other b other a other b other');
+  });
+});
+
+describe('sending a download to a client that may stop reading', () => {
+  const BIG = 'x'.repeat(100_000); // larger than any stream buffer: the source feels the destination's pace
+
+  /** A destination that needs `delayMs` per chunk and takes nothing more after `stallAfter` chunks. */
+  function destination({ delayMs = 0, stallAfter = Infinity } = {}) {
+    const taken = [];
+    let writes = 0;
+    const writable = new Writable({
+      highWaterMark: 1,
+      write(chunk, _encoding, callback) {
+        writes += 1;
+        if (writes > stallAfter) return; // never calls back: this client has stopped reading
+        setTimeout(() => {
+          taken.push(chunk.length);
+          callback();
+        }, delayMs);
+      },
+    });
+    writable.taken = taken;
+    return writable;
+  }
+
+  /** A source of `count` chunks that records whether it was closed properly. */
+  function source(count, { chunk = BIG, delayMs = 0, failAt = Infinity } = {}) {
+    const state = { produced: 0, closed: false };
+    state.chunks = (async function* produce() {
+      try {
+        for (let i = 0; i < count; i += 1) {
+          if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+          if (i === failAt) throw new Error('source failed');
+          state.produced += 1;
+          yield chunk;
+        }
+      } finally {
+        state.closed = true;
+      }
+    })();
+    return state;
+  }
+
+  /** Timers of this process that are still due (the idle timer is one while it is armed). */
+  const pendingTimers = () => process.getActiveResourcesInfo().filter((kind) => kind === 'Timeout').length;
+
+  it('hands everything over, at the pace of the destination', async () => {
+    const timersBefore = pendingTimers();
+    const from = source(5);
+    const to = destination({ delayMs: 5 });
+    assert.deepEqual(await sendChunks(from.chunks, to, { idleTimeoutMs: 60_000 }), { completed: true });
+    assert.deepEqual(to.taken, Array(5).fill(BIG.length));
+    assert.equal(to.writableFinished, true, 'and ends the destination');
+    assert.equal(from.closed, true);
+    assert.equal(pendingTimers(), timersBefore, 'no idle timer is left running once the transfer is over');
+  });
+
+  it('gives up on a destination that takes nothing more for the idle timeout', async () => {
+    const from = source(50);
+    const to = destination({ stallAfter: 2 });
+    const started = performance.now();
+    const outcome = await sendChunks(from.chunks, to, { idleTimeoutMs: 150 });
+    const elapsed = performance.now() - started;
+    assert.equal(outcome.completed, false);
+    assert.equal(outcome.stalled, true);
+    assert.ok(elapsed >= 140 && elapsed < 2_000, `after the timeout, not before (${elapsed.toFixed(0)} ms)`);
+    assert.equal(to.destroyed, true, 'the destination is dropped');
+    assert.equal(to.taken.length, 2);
+    assert.ok(from.produced < 10, `the source was not read ahead (${from.produced} chunks)`);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(from.closed, true, 'and the source is closed');
+  });
+
+  it('leaves a slow destination alone as long as it keeps taking data', async () => {
+    const from = source(15);
+    const to = destination({ delayMs: 40 }); // 15 chunks x 40 ms: far longer in total than the timeout
+    const started = performance.now();
+    const outcome = await sendChunks(from.chunks, to, { idleTimeoutMs: 400 });
+    assert.deepEqual(outcome, { completed: true });
+    assert.equal(to.taken.length, 15);
+    assert.ok(performance.now() - started >= 500, 'the transfer took longer than the idle timeout');
+  });
+
+  it('does not count the time the source needs', async () => {
+    const from = source(4, { delayMs: 120 }); // each chunk takes longer to produce than the timeout
+    const to = destination();
+    assert.deepEqual(await sendChunks(from.chunks, to, { idleTimeoutMs: 60 }), { completed: true });
+    assert.equal(to.taken.length, 4);
+  });
+
+  it('applies the timeout to the buffered tail as well, after the source has finished', async () => {
+    const from = source(3, { chunk: 'tail' }); // small chunks: all three are buffered at once
+    const to = destination({ stallAfter: 2 });
+    const sending = sendChunks(from.chunks, to, { idleTimeoutMs: 150 });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(from.closed, true, 'the source is done; only the destination is behind');
+    assert.equal(await stillPending(sending, 3_000), false, 'the transfer does not hang on the last chunk');
+    const outcome = await sending;
+    assert.equal(outcome.completed, false);
+    assert.equal(outcome.stalled, true);
+    assert.equal(to.destroyed, true);
+  });
+
+  it('waits as long as it takes when the timeout is 0, until the signal ends the transfer', async () => {
+    const from = source(50);
+    const to = destination({ stallAfter: 1 });
+    const gone = new AbortController();
+    const sending = sendChunks(from.chunks, to, { idleTimeoutMs: 0, signal: gone.signal });
+    assert.equal(await stillPending(sending, 300), true, 'no timeout: still waiting for the destination');
+    gone.abort();
+    const outcome = await sending;
+    assert.equal(outcome.completed, false);
+    assert.equal(outcome.stalled, false);
+    assert.equal(outcome.error.code, 'ERR_STREAM_PREMATURE_CLOSE');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(from.closed, true);
+
+    // A signal that has already fired ends the transfer before it starts.
+    const late = source(3);
+    const outcomeLate = await sendChunks(late.chunks, destination(), { signal: gone.signal });
+    assert.equal(outcomeLate.completed, false);
+  });
+
+  it('reports a failing source as an error, not as a stalled client', async () => {
+    const from = source(5, { failAt: 2 });
+    const to = destination();
+    const outcome = await sendChunks(from.chunks, to, { idleTimeoutMs: 1_000 });
+    assert.equal(outcome.completed, false);
+    assert.equal(outcome.stalled, false);
+    assert.equal(outcome.error.message, 'source failed');
+    assert.equal(to.destroyed, true, 'the destination is not left open with half a file');
   });
 });

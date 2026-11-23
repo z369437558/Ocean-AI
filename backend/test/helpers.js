@@ -7,13 +7,27 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { it as runnerIt } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { openDatabase } from '../src/db/sqlite.js';
+import { foldText } from '../src/lib/text.js';
 
 const BACKEND_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * `it` with a time limit of its own, so that a test that hangs is reported instead of stalling
+ * the run. The limit is set per test here rather than with the runner's --test-timeout, because
+ * before Node 24 that option also limits every test FILE as a whole to the same time: generous
+ * for one test, far too tight for a whole file on a slow machine.
+ */
+export const TEST_TIMEOUT_MS = 180_000;
+export function it(name, fn) {
+  return runnerIt(name, { timeout: TEST_TIMEOUT_MS }, fn);
+}
 
 export const ALICE = 'alice@east.test';
 export const BOB = 'bob@west.test';
@@ -84,12 +98,14 @@ export function runScriptToExit(script, args = [], options) {
 }
 
 // Everything a server under test depends on is pinned here, so settings exported in the
-// developer's shell (HOST, EXPORT_...) cannot change what the tests observe. SQLITE_DRIVER and
-// DB_BUSY_TIMEOUT_MS are inherited on purpose: the suite is meant to be run with either driver.
+// developer's shell (HOST, DB_BUSY_TIMEOUT_MS, EXPORT_...) cannot change what the tests observe.
+// SQLITE_DRIVER alone is inherited, on purpose: the suite is meant to be run with either driver.
+// (test/support/pin-settings.mjs does the same for the test process itself.)
 const serverEnv = (dbPath, env) => ({
   PORT: '0',
   HOST: '127.0.0.1',
   DB_PATH: dbPath,
+  DB_BUSY_TIMEOUT_MS: '',
   LOG_REQUESTS: '0',
   STATIC_DIR: path.join(BACKEND_DIR, 'no-frontend'),
   EXPORT_MAX_CONCURRENT: '',
@@ -169,13 +185,17 @@ export async function startFreshServer(options) {
   };
 }
 
+/** No request of the suite takes anywhere near this long; one that does has been left unanswered. */
+const REQUEST_TIMEOUT_MS = 60_000;
+
 /**
  * Minimal HTTP client bound to one actor.
  * Responses: `{ status, headers, text, json }` (json is null for non-JSON bodies).
  */
 export function clientFor(baseUrl, actorEmail) {
   async function request(method, urlPath, { body, headers = {}, rawBody } = {}) {
-    const init = { method, headers: { ...headers } };
+    // A server that stops answering fails the test that asked, with the request in the message.
+    const init = { method, headers: { ...headers }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) };
     if (actorEmail) init.headers['X-Actor-Email'] = actorEmail;
     if (rawBody !== undefined) {
       init.body = rawBody;
@@ -183,8 +203,15 @@ export function clientFor(baseUrl, actorEmail) {
       init.headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(body);
     }
-    const response = await fetch(baseUrl + urlPath, init);
-    const text = await response.text();
+    let response;
+    let text;
+    try {
+      response = await fetch(baseUrl + urlPath, init);
+      text = await response.text();
+    } catch (err) {
+      if (err?.name !== 'TimeoutError') throw err;
+      throw new Error(`${method} ${urlPath} was not answered within ${REQUEST_TIMEOUT_MS / 1000} s`);
+    }
     let json = null;
     if ((response.headers.get('content-type') ?? '').includes('application/json')) json = JSON.parse(text);
     return { status: response.status, headers: response.headers, text, json };
@@ -238,6 +265,25 @@ export function parseCsv(text) {
     rows.push(row);
   }
   return rows;
+}
+
+/**
+ * Adds a learner the way the application's own writers do (the folded name is stored next to the
+ * name); returns the new id. Tests use it for names the demo data does not have.
+ */
+export function insertLearner(db, tenantId, name) {
+  return db.run(
+    "INSERT INTO learners (tenant_id, full_name, name_key, created_at) VALUES (@tenantId, @name, @nameKey, '2026-01-01T00:00:00.000Z')",
+    { tenantId, name, nameKey: foldText(name) },
+  ).lastInsertRowid;
+}
+
+/** Adds a course, like insertLearner; returns the new id. */
+export function insertCourse(db, tenantId, title) {
+  return db.run(
+    "INSERT INTO courses (tenant_id, title, title_key, created_at) VALUES (@tenantId, @title, @titleKey, '2026-01-01T00:00:00.000Z')",
+    { tenantId, title, titleKey: foldText(title) },
+  ).lastInsertRowid;
 }
 
 /** Counts used by "nothing was written" assertions. */
@@ -296,6 +342,86 @@ export function openStream(baseUrl, urlPath, actorEmail) {
       });
     });
     req.on('error', reject);
+  });
+}
+
+/** Splits what a server sent on one connection into its HTTP responses; an incomplete last one is left out. */
+function parseResponses(buffer) {
+  const responses = [];
+  let offset = 0;
+  for (;;) {
+    const headEnd = buffer.indexOf('\r\n\r\n', offset);
+    if (headEnd < 0) return responses;
+    const [statusLine, ...headerLines] = buffer.toString('latin1', offset, headEnd).split('\r\n');
+    const headers = Object.fromEntries(
+      headerLines.map((line) => [line.slice(0, line.indexOf(':')).toLowerCase(), line.slice(line.indexOf(':') + 1).trim()]),
+    );
+    let position = headEnd + 4;
+    const parts = [];
+    if (/chunked/i.test(headers['transfer-encoding'] ?? '')) {
+      for (;;) {
+        const lineEnd = buffer.indexOf('\r\n', position);
+        if (lineEnd < 0) return responses;
+        const size = Number.parseInt(buffer.toString('latin1', position, lineEnd), 16);
+        const dataEnd = lineEnd + 2 + size;
+        if (dataEnd + 2 > buffer.length) return responses;
+        parts.push(buffer.subarray(lineEnd + 2, dataEnd));
+        position = dataEnd + 2;
+        if (size === 0) break;
+      }
+    } else {
+      const length = Number(headers['content-length'] ?? 0);
+      if (position + length > buffer.length) return responses;
+      parts.push(buffer.subarray(position, position + length));
+      position += length;
+    }
+    responses.push({ status: Number(statusLine.split(' ')[1]), headers, body: Buffer.concat(parts).toString('utf8') });
+    offset = position;
+  }
+}
+
+/**
+ * Sends several GET requests on one connection without waiting for the answers (HTTP pipelining),
+ * which neither fetch nor node:http ever does. Resolves once the requests are on their way; until
+ * `responses()` is called the client reads nothing at all.
+ *   { responses(count): Promise<[{ status, headers, body }]>, close() }
+ */
+export function sendPipelined(baseUrl, urlPaths, actorEmail) {
+  const { hostname, port } = new URL(baseUrl);
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(Number(port), hostname);
+    socket.pause();
+    socket.once('error', reject);
+    socket.once('connect', () => {
+      socket.on('error', () => {}); // a server that drops the connection is something tests assert on, not a crash
+      const requests = urlPaths.map((urlPath) => `GET ${urlPath} HTTP/1.1\r\nHost: ${hostname}\r\nX-Actor-Email: ${actorEmail}\r\n\r\n`);
+      socket.write(requests.join(''), () =>
+        resolve({
+          /** Reads until `count` complete responses have arrived. */
+          responses: (count, { timeoutMs = 10_000 } = {}) =>
+            new Promise((done, failed) => {
+              let received = Buffer.alloc(0);
+              const giveUp = (why) =>
+                failed(new Error(`${why}: ${parseResponses(received).length} of ${count} pipelined responses arrived`));
+              const timer = setTimeout(() => giveUp(`no more data after ${timeoutMs} ms`), timeoutMs);
+              socket.on('data', (chunk) => {
+                received = Buffer.concat([received, chunk]);
+                const parsed = parseResponses(received);
+                if (parsed.length < count) return;
+                clearTimeout(timer);
+                done(parsed);
+              });
+              socket.once('close', () => {
+                clearTimeout(timer);
+                giveUp('the connection was closed');
+              });
+              socket.resume();
+            }),
+          /** The client walks away, whatever is still outstanding. */
+          close: () => socket.destroy(),
+        }),
+      );
+    });
   });
 }
 

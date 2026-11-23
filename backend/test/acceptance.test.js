@@ -2,11 +2,13 @@
  * Acceptance tests A1-A5 and A7 (A6 lives in scale.test.js). Each suite gets its own freshly seeded
  * database and server process, so suites are independent and can run in any order.
  */
+import './support/pin-settings.mjs'; // must stay first: see the file
+
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { after, before, describe, it } from 'node:test';
+import { after, before, describe } from 'node:test';
 
 import { createApp } from '../src/app.js';
 import { openInitializedDatabase } from '../src/bootstrap.js';
@@ -24,12 +26,17 @@ import {
   countRows,
   createTempDir,
   foldedCompare,
+  insertCourse,
+  insertLearner,
+  it,
   openStream,
   parseCsv,
+  referenceFold,
   removeTempDir,
   runScript,
   runScriptToExit,
   runServerToExit,
+  sendPipelined,
   startFreshServer,
   startServer,
   stillPending,
@@ -600,7 +607,7 @@ describe('A2 - while another process holds the database write lock', () => {
     assert.deepEqual(countRows(db, WEST), { ...before, auditEvents: before.auditEvents + 1 });
   });
 
-  it('a queued bulk issue is answered once an identical request has completed elsewhere, however long the lock stays taken', async () => {
+  it('queued bulk issues are answered once a request with their key has completed elsewhere, however long the lock stays taken', async () => {
     // "Elsewhere" is another process that shares the database - played here by this test process
     // calling the same service code on its own connection - followed by an unrelated long write.
     const bobActor = findActorByEmail(elsewhere, BOB);
@@ -609,30 +616,53 @@ describe('A2 - while another process holds the database write lock', () => {
 
     locker.exec('BEGIN IMMEDIATE');
     try {
-      const queued = timed(() => clientFor(servers[0], BOB).bulkIssue(request.body.courseId, request.idempotencyKey));
-      assert.equal(await stillPending(queued, 400), true, 'the request is queueing for the lock');
+      // Two requests queue for the lock under one key: the same payload on one server, another
+      // course on the other.
+      const queuedSame = timed(() => clientFor(servers[0], BOB).bulkIssue(request.body.courseId, request.idempotencyKey));
+      const queuedOther = timed(() => clientFor(servers[1], BOB).bulkIssue(SEED.west.manualHandling, request.idempotencyKey));
+      assert.equal(await stillPending(Promise.race([queuedSame, queuedOther]), 400), true, 'both requests are queueing for the lock');
 
-      // The lock changes hands without a pause: first to the identical request, then to the long write.
+      // The lock changes hands without a pause: first to a request with that key, then to the long write.
       locker.exec('COMMIT');
-      const other = bulkIssueElsewhere(elsewhere, bobActor, request);
+      const other = bulkIssueElsewhere(elsewhere, bobActor, request).then(
+        (done) => ({ status: done.status, text: done.body, replayed: done.replayed }),
+        (err) => ({ status: err.status, conflictWith: err.details?.operationId }),
+      );
       locker.exec('BEGIN IMMEDIATE');
 
-      const first = await other;
-      assert.equal(await stillPending(queued, PROMPT_MS), false, 'answered although the write lock is still taken');
-      const { value: answer } = await queued;
-      assert.equal(answer.status, 201);
-      assert.equal(answer.text, first.body, 'the same outcome the other caller got');
-      // Whoever got the lock first executed; the other one replayed. (Almost always "elsewhere" is first.)
-      assert.deepEqual([answer.headers.get('idempotent-replayed'), String(first.replayed)].sort(), ['false', 'true']);
+      const elsewhereAnswer = await other;
+      assert.equal(await stillPending(Promise.all([queuedSame, queuedOther]), PROMPT_MS), false, 'both are answered although the write lock is still taken');
+      const viaHttp = ({ value }) => ({
+        status: value.status,
+        text: value.text,
+        replayed: value.headers.get('idempotent-replayed') === 'true',
+        conflictWith: value.json?.error?.details?.operationId,
+        code: value.json?.error?.code,
+      });
+      const same = viaHttp(await queuedSame);
+      const otherCourse = viaHttp(await queuedOther);
+
+      // Whichever request got the lock first executed - almost always the one "elsewhere". Its
+      // payload wins the key: the callers that sent that payload share one outcome, and the
+      // request for the other course is a 409 that names the operation it collided with.
+      const winners = elsewhereAnswer.status === 201 ? [elsewhereAnswer, same] : [otherCourse];
+      const losers = elsewhereAnswer.status === 201 ? [otherCourse] : [elsewhereAnswer, same];
+      const operation = JSON.parse(winners[0].text);
+      for (const winner of winners) {
+        assert.equal(winner.status, 201);
+        assert.equal(winner.text, winners[0].text, 'the same outcome for every caller with that payload');
+      }
+      assert.equal(winners.filter((winner) => !winner.replayed).length, 1, 'executed once, replayed to the rest');
+      for (const loser of losers) {
+        assert.equal(loser.status, 409);
+        assert.equal(loser.conflictWith, operation.id);
+        if (loser !== elsewhereAnswer) assert.equal(loser.code, 'idempotency_key_reused');
+      }
       assert.deepEqual(countRows(db, WEST), {
-        certificates: before.certificates + answer.json.summary.issued,
-        auditEvents: before.auditEvents + answer.json.summary.issued,
+        certificates: before.certificates + operation.summary.issued,
+        auditEvents: before.auditEvents + operation.summary.issued,
         operations: before.operations + 1,
       });
-      // A different payload under that key, queued the same way, is turned away while the lock is still held.
-      const conflict = await timed(() => clientFor(servers[1], BOB).bulkIssue(SEED.west.manualHandling, request.idempotencyKey));
-      assert.equal(conflict.value.status, 409);
-      assert.ok(conflict.ms < PROMPT_MS);
     } finally {
       locker.exec('ROLLBACK');
     }
@@ -662,6 +692,46 @@ describe('A2 - while another process holds the database write lock', () => {
       assert.equal(answer.json.revokedAt, first.revokedAt);
       assert.equal(answer.json.revocationReason, first.revocationReason);
       assert.deepEqual(countRows(db, WEST), { ...before, auditEvents: before.auditEvents + 1 });
+    } finally {
+      locker.exec('ROLLBACK');
+    }
+  });
+
+  it('a queued revocation is answered once the certificate has disappeared, however long the lock stays taken', async () => {
+    // A certificate of its own for this test, removed again "elsewhere" (as the load-test
+    // generator does with its certificates) while the revocation queues.
+    const tenant = { id: WEST, code: 'WEST', timezone: 'Australia/Perth' };
+    const learnerId = insertLearner(elsewhere, WEST, 'Gone Tomorrow');
+    const { id } = elsewhere.transaction(() =>
+      issueCertificate(elsewhere, {
+        tenant,
+        actor: { adminId: 2, email: BOB },
+        course: { id: SEED.west.heights, title: 'Working at Heights' },
+        learner: { id: learnerId, name: 'Gone Tomorrow' },
+        issuedAt: '2026-08-05T00:00:00Z',
+      }),
+    );
+    assert.equal((await clientFor(servers[0], BOB).get(`/api/certificates/${id}`)).json.status, 'active');
+
+    locker.exec('BEGIN IMMEDIATE');
+    try {
+      const queued = timed(() => clientFor(servers[0], BOB).post(`/api/certificates/${id}/revoke`, { reason: 'queued' }));
+      assert.equal(await stillPending(queued, 400), true, 'the revocation is queueing for the lock');
+
+      locker.exec('COMMIT');
+      elsewhere.transaction(() => {
+        elsewhere.run('DELETE FROM audit_events WHERE certificate_id = @id', { id });
+        elsewhere.run('DELETE FROM certificates WHERE id = @id', { id });
+      });
+      locker.exec('BEGIN IMMEDIATE');
+
+      assert.equal(await stillPending(queued, PROMPT_MS), false, 'answered although the write lock is still taken');
+      const { value: answer } = await queued;
+      // 404 once the certificate is gone - unless the queued request got the lock in the instant
+      // between the two writers, in which case it revoked the certificate before it was removed.
+      assert.ok(answer.status === 404 || (answer.status === 200 && answer.json.alreadyRevoked === false), `status ${answer.status}`);
+      if (answer.status === 404) assert.equal(answer.json.error.code, 'not_found');
+      assert.equal((await clientFor(servers[1], BOB).get(`/api/certificates/${id}`)).status, 404);
     } finally {
       locker.exec('ROLLBACK');
     }
@@ -965,7 +1035,9 @@ describe('bulk issue with injected failures (A2 atomicity, A4 per-learner isolat
   let failBefore = new Set();
   let failAfter = new Set();
   let abortAfter = new Set();
+  /** What the app logged as errors: the text of each call, and whether it came with the Error itself (stack trace and all). */
   const logged = [];
+  const loggedInFull = [];
 
   const lastSerial = (tenantId) => db.get('SELECT last_serial FROM tenants WHERE id = @tenantId', { tenantId }).last_serial;
   const certificatesOf = (courseId, learnerName) =>
@@ -979,7 +1051,13 @@ describe('bulk issue with injected failures (A2 atomicity, A4 per-learner isolat
       db,
       openReader: () => openDatabase(dbPath, { queryOnly: true }),
       // The failures below are intentional: keep them out of the test output, but remember them.
-      logger: { log() {}, error: (...args) => logged.push(args.map(String).join(' ')) },
+      logger: {
+        log() {},
+        error: (...args) => {
+          logged.push(args.map(String).join(' '));
+          loggedInFull.push(args.some((arg) => arg instanceof Error));
+        },
+      },
       hooks: {
         beforeIssue: ({ learner }) => {
           if (failBefore.has(learner.name)) throw new Error('simulated storage failure: CHECK constraint failed: secret_internal_detail');
@@ -1095,6 +1173,35 @@ describe('bulk issue with injected failures (A2 atomicity, A4 per-learner isolat
     assert.equal(jordan.outcome, 'issued');
     assert.equal(jordan.serialNumber, 'WEST-0000006', 'no gap in the serial numbers');
   });
+
+  it('when many learners of one operation fail, the cause is logged in full once and in one line for each of the others', async () => {
+    const names = ['Fail One', 'Fail Two', 'Fail Three', 'Fail Four'];
+    let courseId;
+    db.transaction(() => {
+      courseId = insertCourse(db, EAST, 'Everybody fails');
+      for (const name of names) {
+        db.run(
+          `INSERT INTO enrollments (tenant_id, course_id, learner_id, status, completed_at, created_at)
+           VALUES (@tenantId, @courseId, @learnerId, 'completed', '2026-08-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z')`,
+          { tenantId: EAST, courseId, learnerId: insertLearner(db, EAST, name) },
+        );
+      }
+    });
+    failBefore = new Set(names);
+    const firstLine = logged.length;
+    const res = await alice.bulkIssue(courseId, 'all-failed-1');
+    failBefore = new Set();
+    assert.equal(res.status, 201);
+    assert.deepEqual(res.json.summary, { total: 4, issued: 0, skipped: 0, failed: 4 });
+
+    const lines = logged.slice(firstLine);
+    assert.equal(lines.length, 4, 'one log entry per failed learner');
+    for (const line of lines) {
+      assert.match(line, new RegExp(`^\\[bulk-issue\\] operation ${res.json.id}: learner \\d+ failed: .*secret_internal_detail`), 'operation, learner and cause');
+      assert.ok(!line.includes('\n'), 'on a single line');
+    }
+    assert.deepEqual(loggedInFull.slice(firstLine), [true, false, false, false], 'the stack trace is logged once, not once per learner');
+  });
 });
 
 describe('A5 - daylight saving and tenant-local dates', () => {
@@ -1168,10 +1275,7 @@ describe('A5 - daylight saving and tenant-local dates', () => {
     const course = { id: SEED.east.safety101, title: 'Safety 101' };
     const issue = (learnerName, issuedAt) =>
       db.transaction(() => {
-        const learnerId = db.run(
-          "INSERT INTO learners (tenant_id, full_name, created_at) VALUES (1, @name, '2026-01-01T00:00:00.000Z')",
-          { name: learnerName },
-        ).lastInsertRowid;
+        const learnerId = insertLearner(db, EAST, learnerName);
         return issueCertificate(db, { tenant, actor, course, learner: { id: learnerId, name: learnerName }, issuedAt });
       });
     const late = issue('Zz Late', '2026-05-01T14:01:00Z'); // Sydney: 2026-05-02 00:01
@@ -1402,6 +1506,18 @@ describe('certificate list: search, sort, pagination', () => {
     assert.equal(onlyAccent.status, 200);
     assert.equal(onlyAccent.json.total, 0);
     assert.equal(parseCsv((await alice.get('/api/certificates/export.csv?q=%CC%81')).text).length, 1, 'header only');
+
+    // The same goes for an accent that is a character of its own, as many keyboards produce it. It
+    // must not turn into a space - every "first last" name contains one of those.
+    for (const accent of ['´', '¨', '¯', '¸', '˜', '΄']) {
+      const res = await alice.get(`/api/certificates?q=${encodeURIComponent(accent)}`);
+      assert.deepEqual([res.status, res.json.total, res.json.items.length], [200, 0, 0], `q=${accent}`);
+    }
+    assert.equal(parseCsv((await alice.get('/api/certificates/export.csv?q=%C2%B4')).text).length, 1, 'header only');
+    assert.equal((await alice.get('/api/certificates?q=%C2%B4&status=revoked')).json.total, 0);
+    // Next to a letter it is ignored like any other accent.
+    assert.deepEqual(await ids(`q=${encodeURIComponent('Jose´')}`), [JOSE]);
+    assert.deepEqual(await ids(`q=${encodeURIComponent('´Alvarez')}`), [JOSE]);
   });
 
   it('searches learner names and serial numbers only', async () => {
@@ -1419,12 +1535,16 @@ describe('certificate list: search, sort, pagination', () => {
     assert.deepEqual(await ids('q=EAST%250001'), []);
     assert.deepEqual(await ids('q=EAST-0000001'), [1]);
     assert.deepEqual(await ids('q=%5C'), []);
+    assert.deepEqual(await ids('q=%5Ce'), [], 'a backslash does not turn the next character into a match on its own ("e" is in every serial number)');
+    assert.deepEqual(await ids('q=%5C0'), []);
+    assert.deepEqual(await ids('q=EAST%5C-0000001'), []);
     assert.deepEqual(await ids('q=*'), []);
     assert.deepEqual(await ids('q=%5B'), []);
   });
 
   it('filters by status', async () => {
     assert.deepEqual(await ids('status=revoked'), [SEED.east.revokedCertificate]);
+    assert.deepEqual(await ids('status=REVOKED'), [SEED.east.revokedCertificate], 'in any letter case');
     assert.equal((await ids('status=active')).length, SEED.east.certificateCount - 1);
   });
 
@@ -1567,10 +1687,7 @@ describe('certificate list: search, sort, pagination', () => {
       const names = ['Reyes, Dana "DJ"', '=HYPERLINK("http://evil.test","click")', 'Multi\nLine'];
       db.transaction(() => {
         for (const name of names) {
-          const learnerId = db.run(
-            "INSERT INTO learners (tenant_id, full_name, created_at) VALUES (1, @name, '2026-01-01T00:00:00.000Z')",
-            { name },
-          ).lastInsertRowid;
+          const learnerId = insertLearner(db, EAST, name);
           issueCertificate(db, {
             tenant,
             actor: { adminId: 1, email: ALICE },
@@ -1599,10 +1716,7 @@ describe('certificate list: search, sort, pagination', () => {
       const names = ['Élodie Durand', 'alvarez', 'ALVAREZ', 'Álvarez', 'Zoë Zimmer', 'eloise', 'Back\\slash Barry', '100% Pure_Name'];
       db.transaction(() => {
         for (const name of names) {
-          const learnerId = db.run(
-            "INSERT INTO learners (tenant_id, full_name, created_at) VALUES (1, @name, '2026-01-01T00:00:00.000Z')",
-            { name },
-          ).lastInsertRowid;
+          const learnerId = insertLearner(db, EAST, name);
           issueCertificate(db, {
             tenant,
             actor: { adminId: 1, email: ALICE },
@@ -1645,6 +1759,133 @@ describe('certificate list: search, sort, pagination', () => {
       db.close();
     }
   });
+
+  it('finds and sorts the Latin letters that have no accent to drop (ø, ł, ß, ı ...) by their plain spelling', async () => {
+    const db = ctx.openDb();
+    try {
+      const tenant = { id: EAST, code: 'EAST', timezone: 'Australia/Sydney' };
+      const names = ['Łukasz Żółć', 'Øystein Ødegård', 'Straße Groß', 'Işık Yıldız'];
+      db.transaction(() => {
+        for (const name of names) {
+          issueCertificate(db, {
+            tenant,
+            actor: { adminId: 1, email: ALICE },
+            course: { id: SEED.east.forklift, title: 'Forklift Operations' },
+            learner: { id: insertLearner(db, EAST, name), name },
+            issuedAt: '2026-08-02T00:00:00Z',
+          });
+        }
+      });
+      const listed = async (query) => (await alice.get(`/api/certificates?pageSize=100&${query}`)).json.items;
+      const found = async (text) => (await listed(`q=${encodeURIComponent(text)}`)).map((c) => c.learnerName);
+
+      for (const typed of ['lukasz', 'LUKASZ ZOLC', 'Łukasz', 'łukasz żółć']) assert.deepEqual(await found(typed), ['Łukasz Żółć'], typed);
+      for (const typed of ['odegard', 'OYSTEIN', 'ødegård', 'Øystein Ødegård']) assert.deepEqual(await found(typed), ['Øystein Ødegård'], typed);
+      for (const typed of ['strasse', 'STRASSE GROSS', 'straße', 'Groß', 'GROSS']) assert.deepEqual(await found(typed), ['Straße Groß'], typed);
+      for (const typed of ['isik', 'IŞIK', 'ışık', 'Işık', 'YILDIZ', 'yıldız', 'yildiz']) assert.deepEqual(await found(typed), ['Işık Yıldız'], typed);
+
+      // They sort where their plain spelling belongs, not behind "z".
+      const ascending = (await listed('sort=learner&order=asc')).map((c) => c.learnerName);
+      const position = (name) => {
+        assert.ok(ascending.includes(name), name);
+        return ascending.indexOf(name);
+      };
+      assert.ok(position('Işık Yıldız') < position('José Álvarez'), 'i before j');
+      assert.ok(position('José Álvarez') < position('Łukasz Żółć') && position('Łukasz Żółć') < position("Marcus O'Connor"), 'l between j and m');
+      assert.ok(position("Marcus O'Connor") < position('Øystein Ødegård') && position('Øystein Ødegård') < position('Priya Sharma'), 'o between m and p');
+      assert.ok(position('Sofia Rossi') < position('Straße Groß') && position('Straße Groß') < position('Tom Walker'), '"strasse" between "sofia" and "tom"');
+      const csv = parseCsv((await alice.get('/api/certificates/export.csv?sort=learner&order=asc')).text).slice(1);
+      assert.deepEqual(csv.map((row) => row[2]), (await listed('sort=learner&order=asc')).map((c) => c.serialNumber), 'the export agrees');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('sorts course titles the same way - in the certificate list, the export and the course picker', async () => {
+    const db = ctx.openDb();
+    try {
+      const tenant = { id: EAST, code: 'EAST', timezone: 'Australia/Sydney' };
+      const titles = ['Zebra crossing', 'École de sécurité', 'ecole 2', 'ÉCOLE 3', 'ångström B', 'Ångström handling', 'safety 102', 'SAFETY 100'];
+      db.transaction(() => {
+        const learner = { id: insertLearner(db, EAST, 'Course Tester'), name: 'Course Tester' };
+        for (const title of titles) {
+          issueCertificate(db, {
+            tenant,
+            actor: { adminId: 1, email: ALICE },
+            course: { id: insertCourse(db, EAST, title), title },
+            learner,
+            issuedAt: '2026-08-03T00:00:00Z',
+          });
+        }
+      });
+      const listed = async (query) => (await alice.get(`/api/certificates?pageSize=100&${query}`)).json.items;
+
+      const all = await listed('');
+      const expected = [...all].sort((a, b) => foldedCompare(a.courseTitle, b.courseTitle) || a.id - b.id);
+      const ascending = await listed('sort=course&order=asc');
+      assert.deepEqual(ascending.map((c) => c.id), expected.map((c) => c.id));
+      assert.deepEqual((await listed('sort=course&order=desc')).map((c) => c.id), expected.map((c) => c.id).reverse());
+      const distinct = [...new Set(ascending.map((c) => c.courseTitle))];
+      assert.deepEqual(distinct, [
+        'ångström B',
+        'Ångström handling',
+        'ecole 2',
+        'ÉCOLE 3',
+        'École de sécurité',
+        'First Aid Refresher',
+        'Forklift Operations',
+        'SAFETY 100',
+        'Safety 101',
+        'safety 102',
+        'Zebra crossing',
+      ]);
+      for (const order of ['asc', 'desc']) {
+        const csv = parseCsv((await alice.get(`/api/certificates/export.csv?sort=course&order=${order}`)).text).slice(1);
+        assert.deepEqual(csv.map((row) => row[2]), (await listed(`sort=course&order=${order}`)).map((c) => c.serialNumber), `export, ${order}`);
+      }
+
+      // The course picker of the bulk-issue page lists the same titles in the same order.
+      const picker = (await alice.get('/api/courses')).json.items;
+      assert.deepEqual(picker.map((course) => course.title), distinct);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('lists a course roster - and with it the outcomes of a bulk issue - by name, ignoring case and accents', async () => {
+    const db = ctx.openDb();
+    let courseId;
+    try {
+      const names = ['Zadie Smith', 'Émile Zola', 'emil zatopek', 'Ödön von Horváth', 'oscar wilde', 'ÉMILE ZOLA', 'Øyvind', 'Adam Smith'];
+      db.transaction(() => {
+        courseId = insertCourse(db, EAST, 'Roster order');
+        for (const name of names) {
+          db.run(
+            `INSERT INTO enrollments (tenant_id, course_id, learner_id, status, completed_at, created_at)
+             VALUES (@tenantId, @courseId, @learnerId, 'completed', '2026-08-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z')`,
+            { tenantId: EAST, courseId, learnerId: insertLearner(db, EAST, name) },
+          );
+        }
+      });
+    } finally {
+      db.close();
+    }
+    const roster = (await alice.get(`/api/courses/${courseId}/enrollments`)).json.items;
+    // Accented and unaccented spellings mix, equal names keep the order they were added in, and
+    // nothing accented is pushed behind "z".
+    assert.deepEqual(
+      roster.map((row) => row.learnerName),
+      ['Adam Smith', 'emil zatopek', 'Émile Zola', 'ÉMILE ZOLA', 'Ödön von Horváth', 'oscar wilde', 'Øyvind', 'Zadie Smith'],
+    );
+    // Pages are cut from the same order.
+    const paged = [];
+    for (const page of [1, 2, 3]) paged.push(...(await alice.get(`/api/courses/${courseId}/enrollments?pageSize=3&page=${page}`)).json.items);
+    assert.deepEqual(paged.map((row) => row.learnerName), roster.map((row) => row.learnerName));
+
+    const issued = await alice.bulkIssue(courseId, 'roster-order-1');
+    assert.equal(issued.status, 201);
+    assert.deepEqual(issued.json.results.map((result) => result.learnerName), roster.map((row) => row.learnerName));
+  });
 });
 
 describe('export plumbing: connections, slots and stalled downloads', () => {
@@ -1664,9 +1905,19 @@ describe('export plumbing: connections, slots and stalled downloads', () => {
     removeTempDir(dir);
   });
 
-  /** Stands in for a reader connection on a table that never ends, so that a download can be made to stall. */
-  function endlessReader() {
-    const row = { learner_name: 'x'.repeat(200), course_title: 'Endless', serial_number: 'E-1', issued_at: '2026-01-10T13:30:00.000Z' };
+  /**
+   * Stands in for a reader connection on a table that never ends, so that a download can be made
+   * to stall. With `matching` false no row passes the request's filter: the export reads on and on
+   * without ever having anything to send.
+   */
+  function endlessReader({ matching = true } = {}) {
+    const row = {
+      learner_name: 'x'.repeat(200),
+      course_title: 'Endless',
+      serial_number: 'E-1',
+      issued_at: '2026-01-10T13:30:00.000Z',
+      matches: matching ? 1 : 0,
+    };
     const reader = {
       open: true,
       exec() {},
@@ -1685,7 +1936,7 @@ describe('export plumbing: connections, slots and stalled downloads', () => {
       db,
       openReader: () => {
         if (state.failToOpen) throw new Error('simulated failure to open the export connection');
-        const reader = state.endless ? endlessReader() : openDatabase(dbPath, { queryOnly: true });
+        const reader = state.endless ? endlessReader({ matching: state.endless !== 'without matches' }) : openDatabase(dbPath, { queryOnly: true });
         state.readers.push(reader);
         return reader;
       },
@@ -1750,7 +2001,7 @@ describe('export plumbing: connections, slots and stalled downloads', () => {
     const stalled = await openStream(app.baseUrl, '/api/certificates/export.csv', ALICE);
     assert.equal(app.readers[1].open, true);
     await until(() => allClosed(app), { label: 'the stalled download to be dropped' });
-    assert.ok(app.logged.some((line) => /\[export\] download dropped: the client accepted no data for 250 ms/.test(line)), app.logged.join('\n'));
+    assert.ok(app.logged.some((line) => /\[export\] download dropped: the client took no more data for 250 ms/.test(line)), app.logged.join('\n'));
     await assert.rejects(stalled.resume(), 'the client sees a broken download, not a complete file');
   });
 
@@ -1803,6 +2054,115 @@ describe('export plumbing: connections, slots and stalled downloads', () => {
     await until(() => allClosed(app));
     assert.equal(app.readers.length, 3, 'the turned-away and withdrawn requests never opened a connection');
     await until(() => app.slots.active === 0 && app.slots.waiting === 0, { label: 'every slot to be free again' });
+    assert.deepEqual(app.logged, [], 'clients that leave the queue are not errors');
+  });
+
+  it('requests sent ahead on one connection (pipelining) hold no slot until they can be answered, and nothing once the connection is gone', async () => {
+    const app = await startApp({ exportIdleTimeoutMs: 0 });
+    assert.equal(app.slots.active, 0);
+
+    // Five exports in one go; the client reads nothing, so the first answer stays in flight.
+    app.endless = true;
+    const impatient = await sendPipelined(app.baseUrl, Array(5).fill('/api/certificates/export.csv'), ALICE);
+    await until(() => app.readers.length === 1, { label: 'the first of the five exports to start' });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(
+      [app.slots.active, app.slots.waiting, app.readers.length],
+      [1, 0, 1],
+      'only the export that can actually send holds a slot and a connection; the four behind it hold nothing',
+    );
+    // ...so everybody else still gets served.
+    app.endless = false;
+    const somebodyElse = clientFor(app.baseUrl, ALICE).get('/api/certificates/export.csv');
+    assert.equal(await stillPending(somebodyElse, 5_000), false);
+    assert.equal((await somebodyElse).status, 200);
+
+    impatient.close(); // with the first answer still in flight and four requests never answered
+    await until(() => app.slots.active === 0 && app.slots.waiting === 0 && allClosed(app), {
+      label: 'everything the closed connection held to be released',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(app.readers.length, 2, 'the four queued exports never started');
+    assert.deepEqual([app.slots.active, app.slots.waiting], [0, 0]);
+    assert.deepEqual(app.logged, []);
+  });
+
+  it('pipelined requests that are read get their answers one after the other, each complete', async () => {
+    const app = await startApp();
+    const alice = clientFor(app.baseUrl, ALICE);
+    const paths = [
+      '/api/certificates/export.csv?sort=learner',
+      '/api/certificates/export.csv?q=Alex%20Lee',
+      '/api/certificates?pageSize=2&sort=serial',
+      '/api/certificates/export.csv?status=revoked&sort=serial',
+      '/api/certificates/export.csv?sort=bogus',
+    ];
+    const expected = [];
+    for (const urlPath of paths) expected.push(await alice.get(urlPath));
+
+    const client = await sendPipelined(app.baseUrl, paths, ALICE);
+    const answers = await client.responses(paths.length);
+    client.close();
+    assert.deepEqual(answers.map((answer) => answer.status), [200, 200, 200, 200, 400]);
+    assert.deepEqual(answers.map((answer) => answer.body), expected.map((answer) => answer.text));
+    await until(() => app.slots.active === 0 && allClosed(app));
+    assert.equal(app.readers.length, 6, 'three exports each time, one connection each');
+  });
+
+  it('a pipelining client that never reads is dropped after the idle timeout, with everything it held', async () => {
+    const app = await startApp({ exportIdleTimeoutMs: 250 });
+    app.endless = true;
+    const silent = await sendPipelined(app.baseUrl, Array(3).fill('/api/certificates/export.csv'), ALICE);
+    await until(() => app.readers.length === 1);
+    await until(() => app.slots.active === 0 && app.slots.waiting === 0 && allClosed(app), {
+      label: 'the silent connection to be dropped and its export closed',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(app.readers.length, 1, 'the exports queued behind the stalled one never started');
+    assert.equal(app.logged.filter((line) => line.includes('download dropped')).length, 1, app.logged.join('\n'));
+    silent.close();
+  });
+
+  it('an export nobody is waiting for any more stops reading, even when it has nothing to send', async () => {
+    const app = await startApp({ maxConcurrentExports: 1, exportIdleTimeoutMs: 0 });
+    // No row matches the search: after the header the export scans on without producing a chunk.
+    app.endless = 'without matches';
+    const download = await openStream(app.baseUrl, '/api/certificates/export.csv?q=no-such-learner', ALICE);
+    assert.equal(download.status, 200);
+    assert.deepEqual([app.slots.active, app.readers[0].open], [1, true], 'still scanning');
+
+    download.abort();
+    await until(() => allClosed(app) && app.slots.active === 0, { label: 'the abandoned scan to stop and free the only slot' });
+    app.endless = false;
+    assert.equal((await clientFor(app.baseUrl, ALICE).get('/api/certificates/export.csv')).status, 200);
+  });
+
+  it('HEAD announces the download without running it', async () => {
+    const app = await startApp({ maxConcurrentExports: 1, exportIdleTimeoutMs: 0 });
+    const exportUrl = `${app.baseUrl}/api/certificates/export.csv`;
+    const head = (url, headers = { 'X-Actor-Email': ALICE }) => fetch(url, { method: 'HEAD', headers });
+
+    app.endless = true;
+    const holder = await openStream(app.baseUrl, '/api/certificates/export.csv', ALICE); // the only slot is taken
+    app.endless = false;
+
+    const announced = head(`${exportUrl}?q=Alex%20Lee&sort=learner`);
+    assert.equal(await stillPending(announced, 5_000), false, 'answered although no slot is free');
+    const res = await announced;
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'text/csv; charset=utf-8');
+    assert.match(res.headers.get('content-disposition'), /^attachment; filename="certificates-east-\d{8}-\d{4}\.csv"$/);
+    assert.equal(res.headers.get('x-tenant-timezone'), 'Australia/Sydney');
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    assert.equal(await res.text(), '');
+    assert.deepEqual([app.slots.active, app.slots.waiting, app.readers.length], [1, 0, 1], 'no slot, no queue, no connection');
+
+    // It is checked like the download itself.
+    assert.equal((await head(`${exportUrl}?sort=bogus`)).status, 400);
+    assert.equal((await head(exportUrl, {})).status, 401);
+
+    holder.abort();
+    await until(() => allClosed(app) && app.slots.active === 0);
   });
 
   it('an export that cannot even start gives its slot back and answers with a proper error', async () => {
@@ -1881,6 +2241,14 @@ describe('start-up and maintenance commands', () => {
       assert.match(output, new RegExp(`Port ${port} is already in use`));
       assert.doesNotMatch(output, /TypeError|^\s+at /m, 'no stack trace');
       assert.equal((await clientFor(first.baseUrl, ALICE).get('/api/me')).status, 200, 'the running server is unaffected');
+
+      // The address is claimed before the database is opened: a start that fails on the port
+      // says so in one line and does not leave a new database file behind.
+      const neverCreated = path.join(dir, 'port-never-created.sqlite');
+      const second = await runServerToExit(neverCreated, { env: { PORT: port } });
+      assert.equal(second.code, 1);
+      assert.equal(second.output.trim(), `Port ${port} is already in use. Stop the other process or run with PORT=<free port>.`);
+      assert.equal(fs.existsSync(neverCreated), false);
     } finally {
       await first.stop();
     }
@@ -1908,6 +2276,11 @@ describe('start-up and maintenance commands', () => {
       ['SQLITE_DRIVER', 'postgres', /^Unsupported SQLITE_DRIVER "postgres"/m],
       ['EXPORT_MAX_CONCURRENT', '0', /^EXPORT_MAX_CONCURRENT must be an integer between 1 and 64 \(got "0"\)$/m],
       ['EXPORT_IDLE_TIMEOUT_MS', 'never', /^EXPORT_IDLE_TIMEOUT_MS must be an integer/m],
+      // numbers are plain decimal digits: nothing that merely converts to a number is accepted
+      ['PORT', '0x1F90', /^PORT must be an integer between 0 and 65535 \(got "0x1F90"\)$/m],
+      ['PORT', '0b1', /^PORT must be an integer/m],
+      ['DB_BUSY_TIMEOUT_MS', '1e3', /^DB_BUSY_TIMEOUT_MS must be an integer/m],
+      ['EXPORT_MAX_CONCURRENT', '2.0', /^EXPORT_MAX_CONCURRENT must be an integer/m],
     ]) {
       const { code, output } = await runServerToExit(dbPath, { env: { [name]: value } });
       assert.equal(code, 1, `${name}=${value}`);
@@ -1916,6 +2289,16 @@ describe('start-up and maintenance commands', () => {
       assert.equal(output.trim().split('\n').length, 1, `${name}=${value}: one line, got:\n${output}`);
     }
     assert.equal(fs.existsSync(dbPath), false, 'nothing was created along the way');
+
+    // A setting that is present but blank means "not set" - every one of them.
+    const blank = await startServer(dbPath, {
+      env: { SQLITE_DRIVER: '', DB_BUSY_TIMEOUT_MS: ' ', EXPORT_MAX_CONCURRENT: '', EXPORT_IDLE_TIMEOUT_MS: '', LOG_REQUESTS: '' },
+    });
+    try {
+      assert.equal((await clientFor(blank.baseUrl, ALICE).get('/api/certificates')).json.total, SEED.east.certificateCount);
+    } finally {
+      await blank.stop();
+    }
   });
 
   it('the command-line scripts report mistakes briefly, without a stack trace, and change nothing', async () => {
@@ -1924,13 +2307,17 @@ describe('start-up and maintenance commands', () => {
     const pristine = fs.readFileSync(dbPath);
     const notADatabase = path.join(dir, 'cli-not-a-database.sqlite');
     fs.writeFileSync(notADatabase, 'plain text, not SQLite\n'.repeat(200));
+    const fallbackDb = path.join(dir, 'cli-fallback.sqlite');
+    const emptyFile = path.join(dir, 'cli-empty.sqlite'); // e.g. left behind by "touch": a database yet to be created
+    fs.writeFileSync(emptyFile, '');
 
     for (const [script, args, env, message] of [
       ['generate-certificates.js', ['--db', dbPath, '--bogus'], {}, /Unknown option '--bogus'[\s\S]*Usage: /],
       ['generate-certificates.js', ['--db', dbPath, 'stray'], {}, /Usage: /],
       ['generate-certificates.js', ['--db', dbPath, '--count', '-5'], {}, /--count[\s\S]*Usage: /],
-      ['generate-certificates.js', ['--db', dbPath, '--count', '0'], {}, /--count must be a positive integer/],
-      ['generate-certificates.js', ['--db', dbPath, '--count', '2000001'], {}, /count must be an integer between 1 and 2,000,000/],
+      ['generate-certificates.js', ['--db', dbPath, '--count', '0'], {}, /^--count must be a whole number between 1 and 2,000,000 \(got "0"\)$/m],
+      ['generate-certificates.js', ['--db', dbPath, '--count', '2000001'], {}, /^--count must be a whole number between 1 and 2,000,000/m],
+      ['generate-certificates.js', ['--db', dbPath, '--count', 'lots'], {}, /^--count must be a whole number/m],
       ['generate-certificates.js', ['--db', dbPath, '--seed', 'x'], {}, /--seed must be an integer/],
       ['generate-certificates.js', ['--db', dbPath, '--tenant', 'North'], {}, /Unknown tenant "North"/],
       ['generate-certificates.js', ['--db', dir], {}, /Could not open the database at /],
@@ -1939,15 +2326,32 @@ describe('start-up and maintenance commands', () => {
       ['init-db.js', ['--db', dbPath, '--bogus'], {}, /Unknown option '--bogus'[\s\S]*Usage: /],
       ['init-db.js', ['--db', notADatabase], {}, /Could not open the database at /],
       ['init-db.js', ['--db', dbPath], { SQLITE_DRIVER: 'postgres' }, /^Unsupported SQLITE_DRIVER/m],
+      // An empty --db (an unset shell variable, typically) is a mistake, not "use the default database".
+      ['generate-certificates.js', ['--db', '', '--clear'], {}, /^--db needs a path/m],
+      ['generate-certificates.js', ['--db='], {}, /^--db needs a path/m],
+      ['init-db.js', ['--db', '', '--reset'], {}, /^--db needs a path/m],
+      ['init-db.js', ['--db=  '], {}, /^--db needs a path/m],
+      // Mistakes that are noticed before a database that does not exist yet would be created.
+      ['generate-certificates.js', ['--db', path.join(dir, 'cli-new-1.sqlite'), '--tenant', 'North'], {}, /^Unknown tenant "North" \(a new database has the tenants East and West\)$/m],
+      ['generate-certificates.js', ['--db', path.join(dir, 'cli-new-2.sqlite'), '--count', '2000001'], {}, /^--count must be a whole number/m],
+      ['generate-certificates.js', ['--db', path.join(dir, 'cli-new-3.sqlite'), '--clear', '--tenant', 'Nowhere'], {}, /^Unknown tenant "Nowhere"/m],
+      ['generate-certificates.js', ['--db', emptyFile, '--tenant', 'North'], {}, /^Unknown tenant "North" \(a new database/m],
     ]) {
       const label = `${script} ${args.slice(2).join(' ')} ${JSON.stringify(env)}`;
-      const { code, output } = await runScriptToExit(script, args, { env });
+      // DB_PATH names the file the scripts would fall back to; none of these mistakes may reach it.
+      const { code, output } = await runScriptToExit(script, args, { env: { DB_PATH: fallbackDb, ...env } });
       assert.equal(code, 1, label);
       assert.match(output, message, label);
       assert.doesNotMatch(output, /^\s+at |node:internal|Node\.js v/m, `${label}: no stack trace`);
       assert.ok(output.trim().split('\n').length <= 4, `${label}: brief, got:\n${output}`);
     }
     assert.ok(fs.readFileSync(dbPath).equals(pristine), 'the database file is byte for byte what it was');
+    assert.deepEqual(
+      fs.readdirSync(dir).filter((name) => name.startsWith('cli-new-') || name.startsWith('cli-fallback')),
+      [],
+      'and no new database file was created for a command that was refused',
+    );
+    assert.equal(fs.statSync(emptyFile).size, 0, 'nor was the empty file turned into one');
     assert.match(await runScript('generate-certificates.js', ['--help']), /^Usage: /);
   });
 
@@ -1992,6 +2396,18 @@ describe('start-up and maintenance commands', () => {
       assert.deepEqual([first[0].serial_number, first[299].serial_number], ['EAST-LT-0000001', 'EAST-LT-0000300']);
       assert.equal(new Set(first.map((row) => row.serial_number)).size, 300);
       assertSameDatabase(quickStartRows(dump()), pristine, 'after generating');
+
+      // Generated names are stored with their folded form, like every other name.
+      for (const row of first) {
+        assert.equal(row.learner_name_key, referenceFold(row.learner_name), row.serial_number);
+        assert.equal(row.course_title_key, referenceFold(row.course_title), row.serial_number);
+      }
+      const generatedNames = db.all(
+        `SELECT full_name AS name, name_key AS key FROM learners WHERE is_generated = 1
+         UNION ALL SELECT title, title_key FROM courses WHERE is_generated = 1`,
+      );
+      assert.ok(generatedNames.length > 30);
+      for (const { name, key } of generatedNames) assert.equal(key, referenceFold(name), name);
 
       // A second run replaces the set with the very same rows, serial numbers included.
       await runScript('generate-certificates.js', ['--db', dbPath, '--count', '300']);
@@ -2089,7 +2505,7 @@ describe('start-up and maintenance commands', () => {
 
       const output = await runScript('init-db.js', ['--reset', '--db', dbPath]);
       assert.match(output, /Demo data restored/);
-      assert.match(output, /still reads the old data; the files shrink once it has finished/);
+      assert.match(output, /still reads the old data; the files shrink with the next writes after it has finished/);
       assert.equal(certificates(), 3011, 'the reader keeps its snapshot');
       reader.exec('COMMIT');
       assert.equal(certificates(), 11, 'and sees the restored data afterwards');

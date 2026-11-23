@@ -1,14 +1,15 @@
 /**
  * HTTP layer: routing, actor context and error mapping. Business rules live in ./services.
  */
+import { once } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import querystring from 'node:querystring';
-import { Readable, pipeline } from 'node:stream';
 
 import express from 'express';
 
 import { isBusyError } from './db/sqlite.js';
+import { sendChunks } from './lib/download.js';
 import { HttpError } from './lib/errors.js';
 import { LimiterFullError, createLimiter } from './lib/limiter.js';
 import { pathId } from './lib/params.js';
@@ -43,7 +44,7 @@ const MAX_WAITING_EXPORTS = 32;
  * @param {string|null} [deps.staticDir]   built frontend to serve, if any
  * @param {boolean} [deps.logRequests]
  * @param {number} [deps.maxConcurrentExports]  exports that read at the same time; further ones wait
- * @param {number} [deps.exportIdleTimeoutMs]   drop a download whose client stops reading (0 = never)
+ * @param {number} [deps.exportIdleTimeoutMs]   drop a download that makes no progress for this long (0 = never)
  * @param {() => Date} [deps.now]          clock (tests)
  * @param {object} [deps.hooks]            test seams, see services/bulkIssue.js
  * @param {Pick<Console, 'log' | 'error'>} [deps.logger]
@@ -54,7 +55,7 @@ export function createApp({
   staticDir = null,
   logRequests = false,
   maxConcurrentExports = 4,
-  exportIdleTimeoutMs = 30_000,
+  exportIdleTimeoutMs = 300_000,
   now = () => new Date(),
   hooks = {},
   logger = console,
@@ -139,95 +140,118 @@ export function createApp({
   const exportSlots = createLimiter(maxConcurrentExports, { maxWaiting: MAX_WAITING_EXPORTS });
   app.locals.exportSlots = exportSlots; // `active` and `waiting` counts, for diagnostics and tests
 
-  /** Resolves with the slot's release function, or with null when the client left while waiting. */
-  async function waitForExportSlot(res) {
-    const clientGone = new AbortController();
-    const onClose = () => clientGone.abort();
-    res.once('close', onClose);
-    try {
-      return await exportSlots.acquire({ signal: clientGone.signal });
-    } catch (err) {
-      if (clientGone.signal.aborted) return null;
-      if (err instanceof LimiterFullError) {
-        res.set('Retry-After', '5');
-        throw new HttpError(503, 'export_busy', 'Too many exports are running or waiting; try again in a moment');
-      }
-      throw err;
-    } finally {
-      res.off('close', onClose);
+  const connectionWatchers = new WeakMap(); // socket -> callbacks to run when it closes
+
+  /**
+   * An AbortSignal that fires when the request's connection closes, plus `stop()` to end the watch
+   * (which fires the signal as well: either way nobody is waiting for this request any more).
+   *
+   * The connection is watched rather than the response, because a response is not always told.
+   * When a client sends several requests without waiting for the answers (HTTP pipelining), the
+   * later responses queue behind the earlier ones, and before Node 24 a queued response never
+   * gets a 'close' event when the connection goes away. The connection itself always does.
+   */
+  function watchConnection(req) {
+    const socket = req.socket;
+    const closed = new AbortController();
+    const onClose = () => closed.abort();
+
+    // One 'close' listener per connection, shared by all of its requests: a pipelining client can
+    // have dozens of them waiting on the same connection.
+    let watchers = connectionWatchers.get(socket);
+    if (!watchers) {
+      watchers = new Set();
+      connectionWatchers.set(socket, watchers);
+      socket.once('close', () => {
+        for (const notify of [...watchers]) notify();
+      });
     }
+    watchers.add(onClose);
+    if (socket.destroyed) closed.abort();
+
+    return {
+      signal: closed.signal,
+      stop() {
+        watchers.delete(onClose); // connections are reused (keep-alive): do not pile up watchers
+        closed.abort();
+      },
+    };
+  }
+
+  /**
+   * Resolves when `res` may write to its connection: at once, unless it is queued behind earlier
+   * responses of a pipelining client. An export only starts when its response can actually send -
+   * a queued one would hold a slot and a snapshot without being able to deliver a byte.
+   * Rejects when `signal` fires first.
+   */
+  async function responseTurn(res, signal) {
+    signal.throwIfAborted();
+    if (!res.socket) await once(res, 'socket', { signal });
+  }
+
+  async function* startingWith(first, rest) {
+    for (let next = first; !next.done; next = await rest.next()) yield next.value;
   }
 
   api.get('/certificates/export.csv', async (req, res) => {
     const plan = buildExportPlan(req.actor, parseListQuery(req.query, { paginate: false }));
-    const release = await waitForExportSlot(res);
-    if (!release) return;
-
-    // The export gets its own connection (and with it its own read snapshot), so the long-running
-    // download never ties up the connection that serves every other request.
-    async function* exportChunks() {
-      const reader = openReader();
-      try {
-        yield* streamCsvExport(reader, plan);
-      } finally {
-        reader.close();
-      }
-    }
-    const chunks = exportChunks();
-    // Pull the first chunk (header + first rows) before committing to a 200: if the export cannot
-    // even start, the client still gets a proper JSON error instead of a truncated file.
-    let first;
-    try {
-      first = await chunks.next();
-    } catch (err) {
-      release();
-      throw err;
-    }
-
-    // A client that stops reading must not keep the connection, the snapshot and the slot for
-    // ever. The timer runs only while a chunk is waiting to be taken (and for the tail of the
-    // response); the time the server needs to produce the next chunk does not count against it.
-    let idleTimer = null;
-    let stalled = false;
-    let over = false; // the response has ended, one way or another
-    const startIdleTimer = () => {
-      if (over || exportIdleTimeoutMs <= 0) return;
-      idleTimer = setTimeout(() => {
-        stalled = true;
-        res.destroy();
-      }, exportIdleTimeoutMs);
-    };
-
-    res.status(200).set({
+    const downloadHeaders = {
       'Content-Type': 'text/csv; charset=utf-8',
       'Content-Disposition': `attachment; filename="${exportFileName(req.actor, now())}"`,
       'X-Tenant-Timezone': req.actor.timezone,
-    });
-    const body = Readable.from(
-      (async function* paced() {
-        let next = first;
-        while (!next.done) {
-          startIdleTimer();
-          yield next.value; // resumes when the stream asks for more, i.e. the client is still reading
-          clearTimeout(idleTimer);
-          next = await chunks.next();
+    };
+    if (req.method === 'HEAD') {
+      res.status(200).set(downloadHeaders).end(); // what a download would announce, without running one
+      return;
+    }
+
+    const connection = watchConnection(req);
+    let release = null;
+    let chunks = null;
+    try {
+      // Pull the first chunk (header + first rows) before committing to a 200: if the export
+      // cannot even start, the client still gets a proper JSON error instead of a truncated file.
+      let first;
+      try {
+        await responseTurn(res, connection.signal);
+        release = await exportSlots.acquire({ signal: connection.signal });
+        // The export opens a connection of its own (and with it its own read snapshot) and closes it again.
+        chunks = streamCsvExport(openReader, plan, { signal: connection.signal });
+        first = await chunks.next();
+      } catch (err) {
+        if (connection.signal.aborted) {
+          // The client left: nobody to answer. A failure that has nothing to do with that still
+          // belongs in the log.
+          if (err?.name !== 'AbortError') logger.error('[export] failed to start:', err);
+          return;
         }
-        startIdleTimer(); // what is buffered still has to reach the client
-      })(),
-      { objectMode: false },
-    );
-    pipeline(body, res, (err) => {
-      over = true;
-      clearTimeout(idleTimer);
-      // Finalises the generator (closing the snapshot and the connection) however the download
-      // ended, then lets the next waiting export in.
-      chunks
-        .return(undefined)
-        .catch(() => {})
-        .finally(release);
-      if (stalled) logger.log(`[export] download dropped: the client accepted no data for ${exportIdleTimeoutMs} ms`);
-      else if (err && err.code !== 'ERR_STREAM_PREMATURE_CLOSE') logger.error('[export] stream failed:', err);
-    });
+        if (err instanceof LimiterFullError) {
+          res.set('Retry-After', '5');
+          throw new HttpError(503, 'export_busy', 'Too many exports are running or waiting; try again in a moment');
+        }
+        throw err;
+      }
+      if (connection.signal.aborted) return;
+
+      // The download itself. A client that stops reading must not keep the connection, the
+      // snapshot and the slot for ever: see sendChunks for what counts as "stopped".
+      res.status(200).set(downloadHeaders);
+      const outcome = await sendChunks(startingWith(first, chunks), res, {
+        idleTimeoutMs: exportIdleTimeoutMs,
+        signal: connection.signal,
+      });
+      if (outcome.stalled) {
+        logger.log(`[export] download dropped: the client took no more data for ${exportIdleTimeoutMs} ms`);
+      } else if (!outcome.completed && outcome.error.code !== 'ERR_STREAM_PREMATURE_CLOSE') {
+        logger.error('[export] stream failed:', outcome.error);
+      }
+    } finally {
+      // However the request ended: stop the export if it is still reading (closing its snapshot
+      // and connection), and only then let the next waiting export in.
+      connection.stop();
+      await chunks?.return(undefined).catch(() => {});
+      release?.();
+    }
   });
 
   api.get('/certificates/:certificateId', (req, res) => {

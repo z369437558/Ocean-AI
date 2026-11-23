@@ -15,22 +15,38 @@ export function assertPlainText(value, label, { allowLineBreaks = false } = {}) 
   }
 }
 
+/** Length in characters as a person counts them (code points): an emoji is one, not two. */
+export function textLength(text) {
+  return [...text].length;
+}
+
 /**
- * The first of the given query parameter names that carries a value, as a trimmed string.
- * A parameter that is present but blank (`?sort=`) counts as not given, so the next name - or the
- * caller's default - applies.
+ * The one of the given names (aliases of the same parameter) that carries a value, with that value
+ * trimmed: `{ name, text }`, or undefined when none does. A parameter that is present but blank
+ * (`?sort=`) counts as not given. Two aliases with a value each are refused - one of them would
+ * have to be ignored, and nothing a client sends is ignored silently.
  */
-export function queryString(query, names, { maxLength = 200 } = {}) {
+function givenParameter(query, names, maxLength) {
+  let given;
   for (const name of names) {
     const value = query[name];
     if (value === undefined) continue;
     if (typeof value !== 'string') throw badRequest(`Query parameter "${name}" must be a single value`);
     const text = value.trim();
     assertPlainText(text, `Query parameter "${name}"`);
-    if (text.length > maxLength) throw badRequest(`Query parameter "${name}" must be at most ${maxLength} characters`);
-    if (text !== '') return text;
+    if (text.length > maxLength && textLength(text) > maxLength) {
+      throw badRequest(`Query parameter "${name}" must be at most ${maxLength} characters`);
+    }
+    if (text === '') continue;
+    if (given) throw badRequest(`Query parameters "${given.name}" and "${name}" mean the same; send only one of them`);
+    given = { name, text };
   }
-  return undefined;
+  return given;
+}
+
+/** The value of a text parameter that may go by several names, or undefined when it is not given. */
+export function queryString(query, names, { maxLength = 200 } = {}) {
+  return givenParameter(query, names, maxLength)?.text;
 }
 
 /**
@@ -38,15 +54,12 @@ export function queryString(query, names, { maxLength = 200 } = {}) {
  * a digit string too long to be converted exactly is then far beyond `max` either way.
  */
 export function queryInteger(query, names, { min, max, fallback }) {
-  for (const name of names) {
-    const text = queryString(query, [name]);
-    if (text === undefined) continue;
-    if (!/^\d+$/.test(text)) throw badRequest(`Query parameter "${name}" must be a whole number`);
-    const value = Number(text);
-    if (value < min || value > max) throw badRequest(`Query parameter "${name}" must be between ${min} and ${max}`);
-    return value;
-  }
-  return fallback;
+  const given = givenParameter(query, names, 200);
+  if (!given) return fallback;
+  if (!/^\d+$/.test(given.text)) throw badRequest(`Query parameter "${given.name}" must be a whole number`);
+  const value = Number(given.text);
+  if (value < min || value > max) throw badRequest(`Query parameter "${given.name}" must be between ${min} and ${max}`);
+  return value;
 }
 
 /** Positive integer id taken from a path segment; anything else is treated as "no such record". */

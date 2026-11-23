@@ -61,7 +61,9 @@ export function createLimiter(limit, { maxWaiting = Infinity } = {}) {
           },
         };
         function onAbort() {
-          waiting.splice(waiting.indexOf(entry), 1);
+          const position = waiting.indexOf(entry);
+          if (position === -1) return; // admitted already: nothing to withdraw
+          waiting.splice(position, 1);
           reject(signal.reason);
         }
         signal?.addEventListener('abort', onAbort, { once: true });

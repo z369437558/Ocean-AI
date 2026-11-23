@@ -1,0 +1,2351 @@
+{
+  "about": "Recorded from the real backend by frontend/test/fixtures/record.mjs. Do not edit by hand; run the script again.",
+  "actors": {
+    "header": "X-Actor-Email",
+    "items": [
+      {
+        "email": "alice@east.test",
+        "displayName": "Alice (East admin)",
+        "tenant": {
+          "name": "East",
+          "timezone": "Australia/Sydney"
+        }
+      },
+      {
+        "email": "bob@west.test",
+        "displayName": "Bob (West admin)",
+        "tenant": {
+          "name": "West",
+          "timezone": "Australia/Perth"
+        }
+      }
+    ]
+  },
+  "tenants": {
+    "alice@east.test": {
+      "certificates": [
+        {
+          "id": 1,
+          "serialNumber": "EAST-0000001",
+          "learnerId": 1,
+          "learnerName": "Alex Lee",
+          "courseId": 1,
+          "courseTitle": "Safety 101",
+          "status": "active",
+          "issuedAt": "2026-01-10T13:30:00.000Z",
+          "issuedLocal": "2026-01-11 00:30",
+          "issuedLocalDate": "2026-01-11"
+        },
+        {
+          "id": 2,
+          "serialNumber": "EAST-0000002",
+          "learnerId": 4,
+          "learnerName": "Mei Chen",
+          "courseId": 2,
+          "courseTitle": "First Aid Refresher",
+          "status": "revoked",
+          "issuedAt": "2026-02-14T22:15:00.000Z",
+          "issuedLocal": "2026-02-15 09:15",
+          "issuedLocalDate": "2026-02-15"
+        },
+        {
+          "id": 3,
+          "serialNumber": "EAST-0000003",
+          "learnerId": 6,
+          "learnerName": "Sofia Rossi",
+          "courseId": 2,
+          "courseTitle": "First Aid Refresher",
+          "status": "active",
+          "issuedAt": "2026-04-04T15:30:00.000Z",
+          "issuedLocal": "2026-04-05 02:30",
+          "issuedLocalDate": "2026-04-05"
+        },
+        {
+          "id": 4,
+          "serialNumber": "EAST-0000004",
+          "learnerId": 7,
+          "learnerName": "José Álvarez",
+          "courseId": 2,
+          "courseTitle": "First Aid Refresher",
+          "status": "active",
+          "issuedAt": "2026-04-04T16:30:00.000Z",
+          "issuedLocal": "2026-04-05 02:30",
+          "issuedLocalDate": "2026-04-05"
+        },
+        {
+          "id": 5,
+          "serialNumber": "EAST-0000005",
+          "learnerId": 2,
+          "learnerName": "Priya Sharma",
+          "courseId": 3,
+          "courseTitle": "Forklift Operations",
+          "status": "active",
+          "issuedAt": "2026-06-15T02:00:00.000Z",
+          "issuedLocal": "2026-06-15 12:00",
+          "issuedLocalDate": "2026-06-15"
+        },
+        {
+          "id": 6,
+          "serialNumber": "EAST-0000006",
+          "learnerId": 3,
+          "learnerName": "Marcus O'Connor",
+          "courseId": 3,
+          "courseTitle": "Forklift Operations",
+          "status": "active",
+          "issuedAt": "2026-10-03T15:30:00.000Z",
+          "issuedLocal": "2026-10-04 01:30",
+          "issuedLocalDate": "2026-10-04"
+        },
+        {
+          "id": 7,
+          "serialNumber": "EAST-0000007",
+          "learnerId": 5,
+          "learnerName": "Tom Walker",
+          "courseId": 3,
+          "courseTitle": "Forklift Operations",
+          "status": "active",
+          "issuedAt": "2026-10-03T16:30:00.000Z",
+          "issuedLocal": "2026-10-04 03:30",
+          "issuedLocalDate": "2026-10-04"
+        }
+      ],
+      "details": {
+        "1": {
+          "id": 1,
+          "serialNumber": "EAST-0000001",
+          "learnerId": 1,
+          "learnerName": "Alex Lee",
+          "courseId": 1,
+          "courseTitle": "Safety 101",
+          "status": "active",
+          "issuedAt": "2026-01-10T13:30:00.000Z",
+          "issuedLocal": "2026-01-11 00:30",
+          "issuedLocalDate": "2026-01-11",
+          "issuedUtcOffset": "+11:00",
+          "issuedBy": "alice@east.test",
+          "bulkOperationId": null,
+          "revokedAt": null,
+          "revokedLocal": null,
+          "revokedBy": null,
+          "revocationReason": null,
+          "tenant": {
+            "name": "East",
+            "timezone": "Australia/Sydney"
+          },
+          "auditEvents": [
+            {
+              "id": 1,
+              "action": "certificate.issued",
+              "actorEmail": "alice@east.test",
+              "certificateId": 1,
+              "bulkOperationId": null,
+              "createdAt": "2026-01-10T13:30:00.000Z",
+              "createdLocal": "2026-01-11 00:30",
+              "details": {
+                "serialNumber": "EAST-0000001",
+                "learnerId": 1,
+                "learnerName": "Alex Lee",
+                "courseId": 1,
+                "courseTitle": "Safety 101",
+                "source": "demo-seed"
+              }
+            }
+          ]
+        },
+        "2": {
+          "id": 2,
+          "serialNumber": "EAST-0000002",
+          "learnerId": 4,
+          "learnerName": "Mei Chen",
+          "courseId": 2,
+          "courseTitle": "First Aid Refresher",
+          "status": "revoked",
+          "issuedAt": "2026-02-14T22:15:00.000Z",
+          "issuedLocal": "2026-02-15 09:15",
+          "issuedLocalDate": "2026-02-15",
+          "issuedUtcOffset": "+11:00",
+          "issuedBy": "alice@east.test",
+          "bulkOperationId": null,
+          "revokedAt": "2026-03-02T01:00:00.000Z",
+          "revokedLocal": "2026-03-02 12:00",
+          "revokedBy": "alice@east.test",
+          "revocationReason": "Issued in error: assessment was not signed off",
+          "tenant": {
+            "name": "East",
+            "timezone": "Australia/Sydney"
+          },
+          "auditEvents": [
+            {
+              "id": 2,
+              "action": "certificate.issued",
+              "actorEmail": "alice@east.test",
+              "certificateId": 2,
+              "bulkOperationId": null,
+              "createdAt": "2026-02-14T22:15:00.000Z",
+              "createdLocal": "2026-02-15 09:15",
+              "details": {
+                "serialNumber": "EAST-0000002",
+                "learnerId": 4,
+                "learnerName": "Mei Chen",
+                "courseId": 2,
+                "courseTitle": "First Aid Refresher",
+                "source": "demo-seed"
+              }
+            },
+            {
+              "id": 3,
+              "action": "certificate.revoked",
+              "actorEmail": "alice@east.test",
+              "certificateId": 2,
+              "bulkOperationId": null,
+              "createdAt": "2026-03-02T01:00:00.000Z",
+              "createdLocal": "2026-03-02 12:00",
+              "details": {
+                "serialNumber": "EAST-0000002",
+                "reason": "Issued in error: assessment was not signed off",
+                "previousStatus": "active"
+              }
+            }
+          ]
+        },
+        "3": {
+          "id": 3,
+          "serialNumber": "EAST-0000003",
+          "learnerId": 6,
+          "learnerName": "Sofia Rossi",
+          "courseId": 2,
+          "courseTitle": "First Aid Refresher",
+          "status": "active",
+          "issuedAt": "2026-04-04T15:30:00.000Z",
+          "issuedLocal": "2026-04-05 02:30",
+          "issuedLocalDate": "2026-04-05",
+          "issuedUtcOffset": "+11:00",
+          "issuedBy": "alice@east.test",
+          "bulkOperationId": null,
+          "revokedAt": null,
+          "revokedLocal": null,
+          "revokedBy": null,
+          "revocationReason": null,
+          "tenant": {
+            "name": "East",
+            "timezone": "Australia/Sydney"
+          },
+          "auditEvents": [
+            {
+              "id": 4,
+              "action": "certificate.issued",
+              "actorEmail": "alice@east.test",
+              "certificateId": 3,
+              "bulkOperationId": null,
+              "createdAt": "2026-04-04T15:30:00.000Z",
+              "createdLocal": "2026-04-05 02:30",
+              "details": {
+                "serialNumber": "EAST-0000003",
+                "learnerId": 6,
+                "learnerName": "Sofia Rossi",
+                "courseId": 2,
+                "courseTitle": "First Aid Refresher",
+                "source": "demo-seed"
+              }
+            }
+          ]
+        },
+        "4": {
+          "id": 4,
+          "serialNumber": "EAST-0000004",
+          "learnerId": 7,
+          "learnerName": "José Álvarez",
+          "courseId": 2,
+          "courseTitle": "First Aid Refresher",
+          "status": "active",
+          "issuedAt": "2026-04-04T16:30:00.000Z",
+          "issuedLocal": "2026-04-05 02:30",
+          "issuedLocalDate": "2026-04-05",
+          "issuedUtcOffset": "+10:00",
+          "issuedBy": "alice@east.test",
+          "bulkOperationId": null,
+          "revokedAt": null,
+          "revokedLocal": null,
+          "revokedBy": null,
+          "revocationReason": null,
+          "tenant": {
+            "name": "East",
+            "timezone": "Australia/Sydney"
+          },
+          "auditEvents": [
+            {
+              "id": 5,
+              "action": "certificate.issued",
+              "actorEmail": "alice@east.test",
+              "certificateId": 4,
+              "bulkOperationId": null,
+              "createdAt": "2026-04-04T16:30:00.000Z",
+              "createdLocal": "2026-04-05 02:30",
+              "details": {
+                "serialNumber": "EAST-0000004",
+                "learnerId": 7,
+                "learnerName": "José Álvarez",
+                "courseId": 2,
+                "courseTitle": "First Aid Refresher",
+                "source": "demo-seed"
+              }
+            }
+          ]
+        },
+        "5": {
+          "id": 5,
+          "serialNumber": "EAST-0000005",
+          "learnerId": 2,
+          "learnerName": "Priya Sharma",
+          "courseId": 3,
+          "courseTitle": "Forklift Operations",
+          "status": "active",
+          "issuedAt": "2026-06-15T02:00:00.000Z",
+          "issuedLocal": "2026-06-15 12:00",
+          "issuedLocalDate": "2026-06-15",
+          "issuedUtcOffset": "+10:00",
+          "issuedBy": "alice@east.test",
+          "bulkOperationId": null,
+          "revokedAt": null,
+          "revokedLocal": null,
+          "revokedBy": null,
+          "revocationReason": null,
+          "tenant": {
+            "name": "East",
+            "timezone": "Australia/Sydney"
+          },
+          "auditEvents": [
+            {
+              "id": 6,
+              "action": "certificate.issued",
+              "actorEmail": "alice@east.test",
+              "certificateId": 5,
+              "bulkOperationId": null,
+              "createdAt": "2026-06-15T02:00:00.000Z",
+              "createdLocal": "2026-06-15 12:00",
+              "details": {
+                "serialNumber": "EAST-0000005",
+                "learnerId": 2,
+                "learnerName": "Priya Sharma",
+                "courseId": 3,
+                "courseTitle": "Forklift Operations",
+                "source": "demo-seed"
+              }
+            }
+          ]
+        },
+        "6": {
+          "id": 6,
+          "serialNumber": "EAST-0000006",
+          "learnerId": 3,
+          "learnerName": "Marcus O'Connor",
+          "courseId": 3,
+          "courseTitle": "Forklift Operations",
+          "status": "active",
+          "issuedAt": "2026-10-03T15:30:00.000Z",
+          "issuedLocal": "2026-10-04 01:30",
+          "issuedLocalDate": "2026-10-04",
+          "issuedUtcOffset": "+10:00",
+          "issuedBy": "alice@east.test",
+          "bulkOperationId": null,
+          "revokedAt": null,
+          "revokedLocal": null,
+          "revokedBy": null,
+          "revocationReason": null,
+          "tenant": {
+            "name": "East",
+            "timezone": "Australia/Sydney"
+          },
+          "auditEvents": [
+            {
+              "id": 7,
+              "action": "certificate.issued",
+              "actorEmail": "alice@east.test",
+              "certificateId": 6,
+              "bulkOperationId": null,
+              "createdAt": "2026-10-03T15:30:00.000Z",
+              "createdLocal": "2026-10-04 01:30",
+              "details": {
+                "serialNumber": "EAST-0000006",
+                "learnerId": 3,
+                "learnerName": "Marcus O'Connor",
+                "courseId": 3,
+                "courseTitle": "Forklift Operations",
+                "source": "demo-seed"
+              }
+            }
+          ]
+        },
+        "7": {
+          "id": 7,
+          "serialNumber": "EAST-0000007",
+          "learnerId": 5,
+          "learnerName": "Tom Walker",
+          "courseId": 3,
+          "courseTitle": "Forklift Operations",
+          "status": "active",
+          "issuedAt": "2026-10-03T16:30:00.000Z",
+          "issuedLocal": "2026-10-04 03:30",
+          "issuedLocalDate": "2026-10-04",
+          "issuedUtcOffset": "+11:00",
+          "issuedBy": "alice@east.test",
+          "bulkOperationId": null,
+          "revokedAt": null,
+          "revokedLocal": null,
+          "revokedBy": null,
+          "revocationReason": null,
+          "tenant": {
+            "name": "East",
+            "timezone": "Australia/Sydney"
+          },
+          "auditEvents": [
+            {
+              "id": 8,
+              "action": "certificate.issued",
+              "actorEmail": "alice@east.test",
+              "certificateId": 7,
+              "bulkOperationId": null,
+              "createdAt": "2026-10-03T16:30:00.000Z",
+              "createdLocal": "2026-10-04 03:30",
+              "details": {
+                "serialNumber": "EAST-0000007",
+                "learnerId": 5,
+                "learnerName": "Tom Walker",
+                "courseId": 3,
+                "courseTitle": "Forklift Operations",
+                "source": "demo-seed"
+              }
+            }
+          ]
+        }
+      },
+      "courses": [
+        {
+          "id": 2,
+          "title": "First Aid Refresher",
+          "isGenerated": false
+        },
+        {
+          "id": 3,
+          "title": "Forklift Operations",
+          "isGenerated": false
+        },
+        {
+          "id": 1,
+          "title": "Safety 101",
+          "isGenerated": false
+        }
+      ],
+      "rosters": {
+        "1": {
+          "course": {
+            "id": 1,
+            "title": "Safety 101"
+          },
+          "summary": {
+            "enrolled": 5,
+            "completed": 3,
+            "incomplete": 2,
+            "certified": 1,
+            "revoked": 0,
+            "eligible": 2
+          },
+          "items": [
+            {
+              "learnerId": 1,
+              "learnerName": "Alex Lee",
+              "enrollmentId": 1,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-01-09T04:10:00.000Z",
+              "completedLocal": "2026-01-09 15:10",
+              "certificateId": 1,
+              "serialNumber": "EAST-0000001",
+              "certificateStatus": "active",
+              "eligible": false,
+              "reason": "already_certified",
+              "message": "Already certified (certificate EAST-0000001)"
+            },
+            {
+              "learnerId": 3,
+              "learnerName": "Marcus O'Connor",
+              "enrollmentId": 3,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-11-19T02:05:00.000Z",
+              "completedLocal": "2026-11-19 13:05",
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": true,
+              "reason": null,
+              "message": "Completed, not yet certified"
+            },
+            {
+              "learnerId": 4,
+              "learnerName": "Mei Chen",
+              "enrollmentId": 4,
+              "enrollmentStatus": "in_progress",
+              "completedAt": null,
+              "completedLocal": null,
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": false,
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is in progress)"
+            },
+            {
+              "learnerId": 2,
+              "learnerName": "Priya Sharma",
+              "enrollmentId": 2,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-11-17T23:40:00.000Z",
+              "completedLocal": "2026-11-18 10:40",
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": true,
+              "reason": null,
+              "message": "Completed, not yet certified"
+            },
+            {
+              "learnerId": 5,
+              "learnerName": "Tom Walker",
+              "enrollmentId": 5,
+              "enrollmentStatus": "not_started",
+              "completedAt": null,
+              "completedLocal": null,
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": false,
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is not started)"
+            }
+          ],
+          "page": 1,
+          "pageSize": 50,
+          "total": 5,
+          "totalPages": 1
+        },
+        "2": {
+          "course": {
+            "id": 2,
+            "title": "First Aid Refresher"
+          },
+          "summary": {
+            "enrolled": 5,
+            "completed": 4,
+            "incomplete": 1,
+            "certified": 2,
+            "revoked": 1,
+            "eligible": 1
+          },
+          "items": [
+            {
+              "learnerId": 1,
+              "learnerName": "Alex Lee",
+              "enrollmentId": 6,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-11-12T05:30:00.000Z",
+              "completedLocal": "2026-11-12 16:30",
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": true,
+              "reason": null,
+              "message": "Completed, not yet certified"
+            },
+            {
+              "learnerId": 7,
+              "learnerName": "José Álvarez",
+              "enrollmentId": 9,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-04-03T07:20:00.000Z",
+              "completedLocal": "2026-04-03 18:20",
+              "certificateId": 4,
+              "serialNumber": "EAST-0000004",
+              "certificateStatus": "active",
+              "eligible": false,
+              "reason": "already_certified",
+              "message": "Already certified (certificate EAST-0000004)"
+            },
+            {
+              "learnerId": 4,
+              "learnerName": "Mei Chen",
+              "enrollmentId": 7,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-02-13T03:00:00.000Z",
+              "completedLocal": "2026-02-13 14:00",
+              "certificateId": 2,
+              "serialNumber": "EAST-0000002",
+              "certificateStatus": "revoked",
+              "eligible": false,
+              "reason": "certificate_revoked",
+              "message": "Certificate EAST-0000002 was revoked; revoked certificates are not re-issued automatically"
+            },
+            {
+              "learnerId": 2,
+              "learnerName": "Priya Sharma",
+              "enrollmentId": 10,
+              "enrollmentStatus": "in_progress",
+              "completedAt": null,
+              "completedLocal": null,
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": false,
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is in progress)"
+            },
+            {
+              "learnerId": 6,
+              "learnerName": "Sofia Rossi",
+              "enrollmentId": 8,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-04-03T06:00:00.000Z",
+              "completedLocal": "2026-04-03 17:00",
+              "certificateId": 3,
+              "serialNumber": "EAST-0000003",
+              "certificateStatus": "active",
+              "eligible": false,
+              "reason": "already_certified",
+              "message": "Already certified (certificate EAST-0000003)"
+            }
+          ],
+          "page": 1,
+          "pageSize": 50,
+          "total": 5,
+          "totalPages": 1
+        },
+        "3": {
+          "course": {
+            "id": 3,
+            "title": "Forklift Operations"
+          },
+          "summary": {
+            "enrolled": 5,
+            "completed": 3,
+            "incomplete": 2,
+            "certified": 3,
+            "revoked": 0,
+            "eligible": 0
+          },
+          "items": [
+            {
+              "learnerId": 1,
+              "learnerName": "Alex Lee",
+              "enrollmentId": 11,
+              "enrollmentStatus": "in_progress",
+              "completedAt": null,
+              "completedLocal": null,
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": false,
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is in progress)"
+            },
+            {
+              "learnerId": 3,
+              "learnerName": "Marcus O'Connor",
+              "enrollmentId": 13,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-10-01T03:30:00.000Z",
+              "completedLocal": "2026-10-01 13:30",
+              "certificateId": 6,
+              "serialNumber": "EAST-0000006",
+              "certificateStatus": "active",
+              "eligible": false,
+              "reason": "already_certified",
+              "message": "Already certified (certificate EAST-0000006)"
+            },
+            {
+              "learnerId": 2,
+              "learnerName": "Priya Sharma",
+              "enrollmentId": 12,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-06-12T01:00:00.000Z",
+              "completedLocal": "2026-06-12 11:00",
+              "certificateId": 5,
+              "serialNumber": "EAST-0000005",
+              "certificateStatus": "active",
+              "eligible": false,
+              "reason": "already_certified",
+              "message": "Already certified (certificate EAST-0000005)"
+            },
+            {
+              "learnerId": 6,
+              "learnerName": "Sofia Rossi",
+              "enrollmentId": 15,
+              "enrollmentStatus": "not_started",
+              "completedAt": null,
+              "completedLocal": null,
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": false,
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is not started)"
+            },
+            {
+              "learnerId": 5,
+              "learnerName": "Tom Walker",
+              "enrollmentId": 14,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-10-02T00:45:00.000Z",
+              "completedLocal": "2026-10-02 10:45",
+              "certificateId": 7,
+              "serialNumber": "EAST-0000007",
+              "certificateStatus": "active",
+              "eligible": false,
+              "reason": "already_certified",
+              "message": "Already certified (certificate EAST-0000007)"
+            }
+          ],
+          "page": 1,
+          "pageSize": 50,
+          "total": 5,
+          "totalPages": 1
+        }
+      },
+      "operations": [],
+      "exportCsv": {
+        "contentDisposition": "attachment; filename=\"certificates-east-20261124-0628.csv\"",
+        "body": "Learner Name,Course Title,Serial Number,Issue Date (Australia/Sydney)\nTom Walker,Forklift Operations,EAST-0000007,2026-10-04 03:30\nMarcus O'Connor,Forklift Operations,EAST-0000006,2026-10-04 01:30\nPriya Sharma,Forklift Operations,EAST-0000005,2026-06-15 12:00\nJosé Álvarez,First Aid Refresher,EAST-0000004,2026-04-05 02:30\nSofia Rossi,First Aid Refresher,EAST-0000003,2026-04-05 02:30\nMei Chen,First Aid Refresher,EAST-0000002,2026-02-15 09:15\nAlex Lee,Safety 101,EAST-0000001,2026-01-11 00:30\n"
+      }
+    },
+    "bob@west.test": {
+      "certificates": [
+        {
+          "id": 8,
+          "serialNumber": "WEST-0000001",
+          "learnerId": 8,
+          "learnerName": "Alex Lee",
+          "courseId": 4,
+          "courseTitle": "Safety 101",
+          "status": "active",
+          "issuedAt": "2026-01-10T13:30:00.000Z",
+          "issuedLocal": "2026-01-10 21:30",
+          "issuedLocalDate": "2026-01-10"
+        },
+        {
+          "id": 9,
+          "serialNumber": "WEST-0000002",
+          "learnerId": 13,
+          "learnerName": "Liam Brown",
+          "courseId": 5,
+          "courseTitle": "Working at Heights",
+          "status": "active",
+          "issuedAt": "2026-03-20T17:45:00.000Z",
+          "issuedLocal": "2026-03-21 01:45",
+          "issuedLocalDate": "2026-03-21"
+        },
+        {
+          "id": 10,
+          "serialNumber": "WEST-0000003",
+          "learnerId": 12,
+          "learnerName": "Grace Kim",
+          "courseId": 5,
+          "courseTitle": "Working at Heights",
+          "status": "revoked",
+          "issuedAt": "2026-08-01T03:00:00.000Z",
+          "issuedLocal": "2026-08-01 11:00",
+          "issuedLocalDate": "2026-08-01"
+        },
+        {
+          "id": 11,
+          "serialNumber": "WEST-0000004",
+          "learnerId": 10,
+          "learnerName": "Emily Davis",
+          "courseId": 6,
+          "courseTitle": "Manual Handling",
+          "status": "active",
+          "issuedAt": "2026-09-12T10:20:00.000Z",
+          "issuedLocal": "2026-09-12 18:20",
+          "issuedLocalDate": "2026-09-12"
+        }
+      ],
+      "details": {
+        "8": {
+          "id": 8,
+          "serialNumber": "WEST-0000001",
+          "learnerId": 8,
+          "learnerName": "Alex Lee",
+          "courseId": 4,
+          "courseTitle": "Safety 101",
+          "status": "active",
+          "issuedAt": "2026-01-10T13:30:00.000Z",
+          "issuedLocal": "2026-01-10 21:30",
+          "issuedLocalDate": "2026-01-10",
+          "issuedUtcOffset": "+08:00",
+          "issuedBy": "bob@west.test",
+          "bulkOperationId": null,
+          "revokedAt": null,
+          "revokedLocal": null,
+          "revokedBy": null,
+          "revocationReason": null,
+          "tenant": {
+            "name": "West",
+            "timezone": "Australia/Perth"
+          },
+          "auditEvents": [
+            {
+              "id": 9,
+              "action": "certificate.issued",
+              "actorEmail": "bob@west.test",
+              "certificateId": 8,
+              "bulkOperationId": null,
+              "createdAt": "2026-01-10T13:30:00.000Z",
+              "createdLocal": "2026-01-10 21:30",
+              "details": {
+                "serialNumber": "WEST-0000001",
+                "learnerId": 8,
+                "learnerName": "Alex Lee",
+                "courseId": 4,
+                "courseTitle": "Safety 101",
+                "source": "demo-seed"
+              }
+            }
+          ]
+        },
+        "9": {
+          "id": 9,
+          "serialNumber": "WEST-0000002",
+          "learnerId": 13,
+          "learnerName": "Liam Brown",
+          "courseId": 5,
+          "courseTitle": "Working at Heights",
+          "status": "active",
+          "issuedAt": "2026-03-20T17:45:00.000Z",
+          "issuedLocal": "2026-03-21 01:45",
+          "issuedLocalDate": "2026-03-21",
+          "issuedUtcOffset": "+08:00",
+          "issuedBy": "bob@west.test",
+          "bulkOperationId": null,
+          "revokedAt": null,
+          "revokedLocal": null,
+          "revokedBy": null,
+          "revocationReason": null,
+          "tenant": {
+            "name": "West",
+            "timezone": "Australia/Perth"
+          },
+          "auditEvents": [
+            {
+              "id": 10,
+              "action": "certificate.issued",
+              "actorEmail": "bob@west.test",
+              "certificateId": 9,
+              "bulkOperationId": null,
+              "createdAt": "2026-03-20T17:45:00.000Z",
+              "createdLocal": "2026-03-21 01:45",
+              "details": {
+                "serialNumber": "WEST-0000002",
+                "learnerId": 13,
+                "learnerName": "Liam Brown",
+                "courseId": 5,
+                "courseTitle": "Working at Heights",
+                "source": "demo-seed"
+              }
+            }
+          ]
+        },
+        "10": {
+          "id": 10,
+          "serialNumber": "WEST-0000003",
+          "learnerId": 12,
+          "learnerName": "Grace Kim",
+          "courseId": 5,
+          "courseTitle": "Working at Heights",
+          "status": "revoked",
+          "issuedAt": "2026-08-01T03:00:00.000Z",
+          "issuedLocal": "2026-08-01 11:00",
+          "issuedLocalDate": "2026-08-01",
+          "issuedUtcOffset": "+08:00",
+          "issuedBy": "bob@west.test",
+          "bulkOperationId": null,
+          "revokedAt": "2026-08-20T06:30:00.000Z",
+          "revokedLocal": "2026-08-20 14:30",
+          "revokedBy": "bob@west.test",
+          "revocationReason": "Practical assessment failed on review",
+          "tenant": {
+            "name": "West",
+            "timezone": "Australia/Perth"
+          },
+          "auditEvents": [
+            {
+              "id": 11,
+              "action": "certificate.issued",
+              "actorEmail": "bob@west.test",
+              "certificateId": 10,
+              "bulkOperationId": null,
+              "createdAt": "2026-08-01T03:00:00.000Z",
+              "createdLocal": "2026-08-01 11:00",
+              "details": {
+                "serialNumber": "WEST-0000003",
+                "learnerId": 12,
+                "learnerName": "Grace Kim",
+                "courseId": 5,
+                "courseTitle": "Working at Heights",
+                "source": "demo-seed"
+              }
+            },
+            {
+              "id": 12,
+              "action": "certificate.revoked",
+              "actorEmail": "bob@west.test",
+              "certificateId": 10,
+              "bulkOperationId": null,
+              "createdAt": "2026-08-20T06:30:00.000Z",
+              "createdLocal": "2026-08-20 14:30",
+              "details": {
+                "serialNumber": "WEST-0000003",
+                "reason": "Practical assessment failed on review",
+                "previousStatus": "active"
+              }
+            }
+          ]
+        },
+        "11": {
+          "id": 11,
+          "serialNumber": "WEST-0000004",
+          "learnerId": 10,
+          "learnerName": "Emily Davis",
+          "courseId": 6,
+          "courseTitle": "Manual Handling",
+          "status": "active",
+          "issuedAt": "2026-09-12T10:20:00.000Z",
+          "issuedLocal": "2026-09-12 18:20",
+          "issuedLocalDate": "2026-09-12",
+          "issuedUtcOffset": "+08:00",
+          "issuedBy": "bob@west.test",
+          "bulkOperationId": null,
+          "revokedAt": null,
+          "revokedLocal": null,
+          "revokedBy": null,
+          "revocationReason": null,
+          "tenant": {
+            "name": "West",
+            "timezone": "Australia/Perth"
+          },
+          "auditEvents": [
+            {
+              "id": 13,
+              "action": "certificate.issued",
+              "actorEmail": "bob@west.test",
+              "certificateId": 11,
+              "bulkOperationId": null,
+              "createdAt": "2026-09-12T10:20:00.000Z",
+              "createdLocal": "2026-09-12 18:20",
+              "details": {
+                "serialNumber": "WEST-0000004",
+                "learnerId": 10,
+                "learnerName": "Emily Davis",
+                "courseId": 6,
+                "courseTitle": "Manual Handling",
+                "source": "demo-seed"
+              }
+            }
+          ]
+        }
+      },
+      "courses": [
+        {
+          "id": 6,
+          "title": "Manual Handling",
+          "isGenerated": false
+        },
+        {
+          "id": 4,
+          "title": "Safety 101",
+          "isGenerated": false
+        },
+        {
+          "id": 5,
+          "title": "Working at Heights",
+          "isGenerated": false
+        }
+      ],
+      "rosters": {
+        "4": {
+          "course": {
+            "id": 4,
+            "title": "Safety 101"
+          },
+          "summary": {
+            "enrolled": 5,
+            "completed": 3,
+            "incomplete": 2,
+            "certified": 1,
+            "revoked": 0,
+            "eligible": 2
+          },
+          "items": [
+            {
+              "learnerId": 8,
+              "learnerName": "Alex Lee",
+              "enrollmentId": 16,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-01-09T06:00:00.000Z",
+              "completedLocal": "2026-01-09 14:00",
+              "certificateId": 8,
+              "serialNumber": "WEST-0000001",
+              "certificateStatus": "active",
+              "eligible": false,
+              "reason": "already_certified",
+              "message": "Already certified (certificate WEST-0000001)"
+            },
+            {
+              "learnerId": 10,
+              "learnerName": "Emily Davis",
+              "enrollmentId": 18,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-11-18T03:50:00.000Z",
+              "completedLocal": "2026-11-18 11:50",
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": true,
+              "reason": null,
+              "message": "Completed, not yet certified"
+            },
+            {
+              "learnerId": 12,
+              "learnerName": "Grace Kim",
+              "enrollmentId": 20,
+              "enrollmentStatus": "not_started",
+              "completedAt": null,
+              "completedLocal": null,
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": false,
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is not started)"
+            },
+            {
+              "learnerId": 9,
+              "learnerName": "Jordan Smith",
+              "enrollmentId": 17,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-11-16T07:15:00.000Z",
+              "completedLocal": "2026-11-16 15:15",
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": true,
+              "reason": null,
+              "message": "Completed, not yet certified"
+            },
+            {
+              "learnerId": 11,
+              "learnerName": "Noah Wilson",
+              "enrollmentId": 19,
+              "enrollmentStatus": "in_progress",
+              "completedAt": null,
+              "completedLocal": null,
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": false,
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is in progress)"
+            }
+          ],
+          "page": 1,
+          "pageSize": 50,
+          "total": 5,
+          "totalPages": 1
+        },
+        "5": {
+          "course": {
+            "id": 5,
+            "title": "Working at Heights"
+          },
+          "summary": {
+            "enrolled": 4,
+            "completed": 3,
+            "incomplete": 1,
+            "certified": 1,
+            "revoked": 1,
+            "eligible": 1
+          },
+          "items": [
+            {
+              "learnerId": 8,
+              "learnerName": "Alex Lee",
+              "enrollmentId": 21,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-11-10T02:00:00.000Z",
+              "completedLocal": "2026-11-10 10:00",
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": true,
+              "reason": null,
+              "message": "Completed, not yet certified"
+            },
+            {
+              "learnerId": 12,
+              "learnerName": "Grace Kim",
+              "enrollmentId": 23,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-07-30T05:00:00.000Z",
+              "completedLocal": "2026-07-30 13:00",
+              "certificateId": 10,
+              "serialNumber": "WEST-0000003",
+              "certificateStatus": "revoked",
+              "eligible": false,
+              "reason": "certificate_revoked",
+              "message": "Certificate WEST-0000003 was revoked; revoked certificates are not re-issued automatically"
+            },
+            {
+              "learnerId": 9,
+              "learnerName": "Jordan Smith",
+              "enrollmentId": 24,
+              "enrollmentStatus": "in_progress",
+              "completedAt": null,
+              "completedLocal": null,
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": false,
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is in progress)"
+            },
+            {
+              "learnerId": 13,
+              "learnerName": "Liam Brown",
+              "enrollmentId": 22,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-03-19T08:00:00.000Z",
+              "completedLocal": "2026-03-19 16:00",
+              "certificateId": 9,
+              "serialNumber": "WEST-0000002",
+              "certificateStatus": "active",
+              "eligible": false,
+              "reason": "already_certified",
+              "message": "Already certified (certificate WEST-0000002)"
+            }
+          ],
+          "page": 1,
+          "pageSize": 50,
+          "total": 4,
+          "totalPages": 1
+        },
+        "6": {
+          "course": {
+            "id": 6,
+            "title": "Manual Handling"
+          },
+          "summary": {
+            "enrolled": 3,
+            "completed": 1,
+            "incomplete": 2,
+            "certified": 1,
+            "revoked": 0,
+            "eligible": 0
+          },
+          "items": [
+            {
+              "learnerId": 8,
+              "learnerName": "Alex Lee",
+              "enrollmentId": 25,
+              "enrollmentStatus": "in_progress",
+              "completedAt": null,
+              "completedLocal": null,
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": false,
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is in progress)"
+            },
+            {
+              "learnerId": 10,
+              "learnerName": "Emily Davis",
+              "enrollmentId": 26,
+              "enrollmentStatus": "completed",
+              "completedAt": "2026-09-11T04:00:00.000Z",
+              "completedLocal": "2026-09-11 12:00",
+              "certificateId": 11,
+              "serialNumber": "WEST-0000004",
+              "certificateStatus": "active",
+              "eligible": false,
+              "reason": "already_certified",
+              "message": "Already certified (certificate WEST-0000004)"
+            },
+            {
+              "learnerId": 11,
+              "learnerName": "Noah Wilson",
+              "enrollmentId": 27,
+              "enrollmentStatus": "not_started",
+              "completedAt": null,
+              "completedLocal": null,
+              "certificateId": null,
+              "serialNumber": null,
+              "certificateStatus": null,
+              "eligible": false,
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is not started)"
+            }
+          ],
+          "page": 1,
+          "pageSize": 50,
+          "total": 3,
+          "totalPages": 1
+        }
+      },
+      "operations": [],
+      "exportCsv": {
+        "contentDisposition": "attachment; filename=\"certificates-west-20261124-0328.csv\"",
+        "body": "Learner Name,Course Title,Serial Number,Issue Date (Australia/Perth)\nEmily Davis,Manual Handling,WEST-0000004,2026-09-12 18:20\nGrace Kim,Working at Heights,WEST-0000003,2026-08-01 11:00\nLiam Brown,Working at Heights,WEST-0000002,2026-03-21 01:45\nAlex Lee,Safety 101,WEST-0000001,2026-01-10 21:30\n"
+      }
+    }
+  },
+  "errors": {
+    "notFound": {
+      "status": 404,
+      "body": {
+        "error": {
+          "code": "not_found",
+          "message": "Certificate not found"
+        }
+      }
+    },
+    "invalidSearch": {
+      "status": 400,
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "Query parameter \"q\" contains characters that are not allowed (control characters or malformed Unicode)"
+        }
+      }
+    },
+    "databaseBusy": {
+      "status": 503,
+      "body": {
+        "error": {
+          "code": "database_busy",
+          "message": "The database is busy; retry the request shortly"
+        }
+      },
+      "headers": {
+        "Retry-After": "1"
+      }
+    },
+    "keyReused": {
+      "status": 409,
+      "body": {
+        "error": {
+          "code": "idempotency_key_reused",
+          "message": "Idempotency-Key \"fixture-key-1\" was already used for a different request. Retry with the original payload, or use a new key for a new operation.",
+          "details": {
+            "operationId": 1
+          }
+        }
+      }
+    }
+  },
+  "bulkIssues": {
+    "alice@east.test": {
+      "courseId": 1,
+      "runs": [
+        {
+          "id": 1,
+          "status": "completed",
+          "course": {
+            "id": 1,
+            "title": "Safety 101"
+          },
+          "idempotencyKey": "fixture-key-1",
+          "requestedBy": "alice@east.test",
+          "tenant": {
+            "name": "East",
+            "timezone": "Australia/Sydney"
+          },
+          "createdAt": "2026-11-23T19:28:00.837Z",
+          "completedAt": "2026-11-23T19:28:00.838Z",
+          "summary": {
+            "total": 5,
+            "issued": 2,
+            "skipped": 3,
+            "failed": 0
+          },
+          "results": [
+            {
+              "learnerId": 1,
+              "learnerName": "Alex Lee",
+              "enrollmentId": 1,
+              "outcome": "skipped",
+              "reason": "already_certified",
+              "message": "Already certified (certificate EAST-0000001)",
+              "certificateId": 1,
+              "serialNumber": "EAST-0000001"
+            },
+            {
+              "learnerId": 3,
+              "learnerName": "Marcus O'Connor",
+              "enrollmentId": 3,
+              "outcome": "issued",
+              "certificateId": 12,
+              "serialNumber": "EAST-0000008",
+              "issuedAt": "2026-11-23T19:28:00.837Z",
+              "issuedLocal": "2026-11-24 06:28"
+            },
+            {
+              "learnerId": 4,
+              "learnerName": "Mei Chen",
+              "enrollmentId": 4,
+              "outcome": "skipped",
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is in progress)"
+            },
+            {
+              "learnerId": 2,
+              "learnerName": "Priya Sharma",
+              "enrollmentId": 2,
+              "outcome": "issued",
+              "certificateId": 13,
+              "serialNumber": "EAST-0000009",
+              "issuedAt": "2026-11-23T19:28:00.837Z",
+              "issuedLocal": "2026-11-24 06:28"
+            },
+            {
+              "learnerId": 5,
+              "learnerName": "Tom Walker",
+              "enrollmentId": 5,
+              "outcome": "skipped",
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is not started)"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "status": "completed",
+          "course": {
+            "id": 1,
+            "title": "Safety 101"
+          },
+          "idempotencyKey": "fixture-key-2",
+          "requestedBy": "alice@east.test",
+          "tenant": {
+            "name": "East",
+            "timezone": "Australia/Sydney"
+          },
+          "createdAt": "2026-11-23T19:28:00.842Z",
+          "completedAt": "2026-11-23T19:28:00.842Z",
+          "summary": {
+            "total": 5,
+            "issued": 0,
+            "skipped": 5,
+            "failed": 0
+          },
+          "results": [
+            {
+              "learnerId": 1,
+              "learnerName": "Alex Lee",
+              "enrollmentId": 1,
+              "outcome": "skipped",
+              "reason": "already_certified",
+              "message": "Already certified (certificate EAST-0000001)",
+              "certificateId": 1,
+              "serialNumber": "EAST-0000001"
+            },
+            {
+              "learnerId": 3,
+              "learnerName": "Marcus O'Connor",
+              "enrollmentId": 3,
+              "outcome": "skipped",
+              "reason": "already_certified",
+              "message": "Already certified (certificate EAST-0000008)",
+              "certificateId": 12,
+              "serialNumber": "EAST-0000008"
+            },
+            {
+              "learnerId": 4,
+              "learnerName": "Mei Chen",
+              "enrollmentId": 4,
+              "outcome": "skipped",
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is in progress)"
+            },
+            {
+              "learnerId": 2,
+              "learnerName": "Priya Sharma",
+              "enrollmentId": 2,
+              "outcome": "skipped",
+              "reason": "already_certified",
+              "message": "Already certified (certificate EAST-0000009)",
+              "certificateId": 13,
+              "serialNumber": "EAST-0000009"
+            },
+            {
+              "learnerId": 5,
+              "learnerName": "Tom Walker",
+              "enrollmentId": 5,
+              "outcome": "skipped",
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is not started)"
+            }
+          ]
+        }
+      ],
+      "rosterAfter": {
+        "course": {
+          "id": 1,
+          "title": "Safety 101"
+        },
+        "summary": {
+          "enrolled": 5,
+          "completed": 3,
+          "incomplete": 2,
+          "certified": 3,
+          "revoked": 0,
+          "eligible": 0
+        },
+        "items": [
+          {
+            "learnerId": 1,
+            "learnerName": "Alex Lee",
+            "enrollmentId": 1,
+            "enrollmentStatus": "completed",
+            "completedAt": "2026-01-09T04:10:00.000Z",
+            "completedLocal": "2026-01-09 15:10",
+            "certificateId": 1,
+            "serialNumber": "EAST-0000001",
+            "certificateStatus": "active",
+            "eligible": false,
+            "reason": "already_certified",
+            "message": "Already certified (certificate EAST-0000001)"
+          },
+          {
+            "learnerId": 3,
+            "learnerName": "Marcus O'Connor",
+            "enrollmentId": 3,
+            "enrollmentStatus": "completed",
+            "completedAt": "2026-11-19T02:05:00.000Z",
+            "completedLocal": "2026-11-19 13:05",
+            "certificateId": 12,
+            "serialNumber": "EAST-0000008",
+            "certificateStatus": "active",
+            "eligible": false,
+            "reason": "already_certified",
+            "message": "Already certified (certificate EAST-0000008)"
+          },
+          {
+            "learnerId": 4,
+            "learnerName": "Mei Chen",
+            "enrollmentId": 4,
+            "enrollmentStatus": "in_progress",
+            "completedAt": null,
+            "completedLocal": null,
+            "certificateId": null,
+            "serialNumber": null,
+            "certificateStatus": null,
+            "eligible": false,
+            "reason": "not_completed",
+            "message": "Course not completed (enrollment is in progress)"
+          },
+          {
+            "learnerId": 2,
+            "learnerName": "Priya Sharma",
+            "enrollmentId": 2,
+            "enrollmentStatus": "completed",
+            "completedAt": "2026-11-17T23:40:00.000Z",
+            "completedLocal": "2026-11-18 10:40",
+            "certificateId": 13,
+            "serialNumber": "EAST-0000009",
+            "certificateStatus": "active",
+            "eligible": false,
+            "reason": "already_certified",
+            "message": "Already certified (certificate EAST-0000009)"
+          },
+          {
+            "learnerId": 5,
+            "learnerName": "Tom Walker",
+            "enrollmentId": 5,
+            "enrollmentStatus": "not_started",
+            "completedAt": null,
+            "completedLocal": null,
+            "certificateId": null,
+            "serialNumber": null,
+            "certificateStatus": null,
+            "eligible": false,
+            "reason": "not_completed",
+            "message": "Course not completed (enrollment is not started)"
+          }
+        ],
+        "page": 1,
+        "pageSize": 50,
+        "total": 5,
+        "totalPages": 1
+      },
+      "operationsAfter": [
+        {
+          "id": 2,
+          "status": "completed",
+          "course": {
+            "id": 1,
+            "title": "Safety 101"
+          },
+          "idempotencyKey": "fixture-key-2",
+          "requestedBy": "alice@east.test",
+          "createdAt": "2026-11-23T19:28:00.842Z",
+          "createdLocal": "2026-11-24 06:28",
+          "summary": {
+            "total": 5,
+            "issued": 0,
+            "skipped": 5,
+            "failed": 0
+          }
+        },
+        {
+          "id": 1,
+          "status": "completed",
+          "course": {
+            "id": 1,
+            "title": "Safety 101"
+          },
+          "idempotencyKey": "fixture-key-1",
+          "requestedBy": "alice@east.test",
+          "createdAt": "2026-11-23T19:28:00.837Z",
+          "createdLocal": "2026-11-24 06:28",
+          "summary": {
+            "total": 5,
+            "issued": 2,
+            "skipped": 3,
+            "failed": 0
+          }
+        }
+      ],
+      "certificatesAfter": [
+        {
+          "id": 1,
+          "serialNumber": "EAST-0000001",
+          "learnerId": 1,
+          "learnerName": "Alex Lee",
+          "courseId": 1,
+          "courseTitle": "Safety 101",
+          "status": "active",
+          "issuedAt": "2026-01-10T13:30:00.000Z",
+          "issuedLocal": "2026-01-11 00:30",
+          "issuedLocalDate": "2026-01-11"
+        },
+        {
+          "id": 2,
+          "serialNumber": "EAST-0000002",
+          "learnerId": 4,
+          "learnerName": "Mei Chen",
+          "courseId": 2,
+          "courseTitle": "First Aid Refresher",
+          "status": "revoked",
+          "issuedAt": "2026-02-14T22:15:00.000Z",
+          "issuedLocal": "2026-02-15 09:15",
+          "issuedLocalDate": "2026-02-15"
+        },
+        {
+          "id": 3,
+          "serialNumber": "EAST-0000003",
+          "learnerId": 6,
+          "learnerName": "Sofia Rossi",
+          "courseId": 2,
+          "courseTitle": "First Aid Refresher",
+          "status": "active",
+          "issuedAt": "2026-04-04T15:30:00.000Z",
+          "issuedLocal": "2026-04-05 02:30",
+          "issuedLocalDate": "2026-04-05"
+        },
+        {
+          "id": 4,
+          "serialNumber": "EAST-0000004",
+          "learnerId": 7,
+          "learnerName": "José Álvarez",
+          "courseId": 2,
+          "courseTitle": "First Aid Refresher",
+          "status": "active",
+          "issuedAt": "2026-04-04T16:30:00.000Z",
+          "issuedLocal": "2026-04-05 02:30",
+          "issuedLocalDate": "2026-04-05"
+        },
+        {
+          "id": 5,
+          "serialNumber": "EAST-0000005",
+          "learnerId": 2,
+          "learnerName": "Priya Sharma",
+          "courseId": 3,
+          "courseTitle": "Forklift Operations",
+          "status": "active",
+          "issuedAt": "2026-06-15T02:00:00.000Z",
+          "issuedLocal": "2026-06-15 12:00",
+          "issuedLocalDate": "2026-06-15"
+        },
+        {
+          "id": 6,
+          "serialNumber": "EAST-0000006",
+          "learnerId": 3,
+          "learnerName": "Marcus O'Connor",
+          "courseId": 3,
+          "courseTitle": "Forklift Operations",
+          "status": "active",
+          "issuedAt": "2026-10-03T15:30:00.000Z",
+          "issuedLocal": "2026-10-04 01:30",
+          "issuedLocalDate": "2026-10-04"
+        },
+        {
+          "id": 7,
+          "serialNumber": "EAST-0000007",
+          "learnerId": 5,
+          "learnerName": "Tom Walker",
+          "courseId": 3,
+          "courseTitle": "Forklift Operations",
+          "status": "active",
+          "issuedAt": "2026-10-03T16:30:00.000Z",
+          "issuedLocal": "2026-10-04 03:30",
+          "issuedLocalDate": "2026-10-04"
+        },
+        {
+          "id": 12,
+          "serialNumber": "EAST-0000008",
+          "learnerId": 3,
+          "learnerName": "Marcus O'Connor",
+          "courseId": 1,
+          "courseTitle": "Safety 101",
+          "status": "active",
+          "issuedAt": "2026-11-23T19:28:00.837Z",
+          "issuedLocal": "2026-11-24 06:28",
+          "issuedLocalDate": "2026-11-24"
+        },
+        {
+          "id": 13,
+          "serialNumber": "EAST-0000009",
+          "learnerId": 2,
+          "learnerName": "Priya Sharma",
+          "courseId": 1,
+          "courseTitle": "Safety 101",
+          "status": "active",
+          "issuedAt": "2026-11-23T19:28:00.837Z",
+          "issuedLocal": "2026-11-24 06:28",
+          "issuedLocalDate": "2026-11-24"
+        }
+      ]
+    },
+    "bob@west.test": {
+      "courseId": 4,
+      "runs": [
+        {
+          "id": 3,
+          "status": "completed",
+          "course": {
+            "id": 4,
+            "title": "Safety 101"
+          },
+          "idempotencyKey": "fixture-key-3",
+          "requestedBy": "bob@west.test",
+          "tenant": {
+            "name": "West",
+            "timezone": "Australia/Perth"
+          },
+          "createdAt": "2026-11-23T19:28:00.843Z",
+          "completedAt": "2026-11-23T19:28:00.844Z",
+          "summary": {
+            "total": 5,
+            "issued": 1,
+            "skipped": 3,
+            "failed": 1
+          },
+          "results": [
+            {
+              "learnerId": 8,
+              "learnerName": "Alex Lee",
+              "enrollmentId": 16,
+              "outcome": "skipped",
+              "reason": "already_certified",
+              "message": "Already certified (certificate WEST-0000001)",
+              "certificateId": 8,
+              "serialNumber": "WEST-0000001"
+            },
+            {
+              "learnerId": 10,
+              "learnerName": "Emily Davis",
+              "enrollmentId": 18,
+              "outcome": "failed",
+              "reason": "issue_failed",
+              "message": "The certificate could not be issued because of an unexpected error. Nothing was saved for this learner; the server log has the details. Other learners are not affected."
+            },
+            {
+              "learnerId": 12,
+              "learnerName": "Grace Kim",
+              "enrollmentId": 20,
+              "outcome": "skipped",
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is not started)"
+            },
+            {
+              "learnerId": 9,
+              "learnerName": "Jordan Smith",
+              "enrollmentId": 17,
+              "outcome": "issued",
+              "certificateId": 14,
+              "serialNumber": "WEST-0000005",
+              "issuedAt": "2026-11-23T19:28:00.843Z",
+              "issuedLocal": "2026-11-24 03:28"
+            },
+            {
+              "learnerId": 11,
+              "learnerName": "Noah Wilson",
+              "enrollmentId": 19,
+              "outcome": "skipped",
+              "reason": "not_completed",
+              "message": "Course not completed (enrollment is in progress)"
+            }
+          ]
+        }
+      ],
+      "rosterAfter": {
+        "course": {
+          "id": 4,
+          "title": "Safety 101"
+        },
+        "summary": {
+          "enrolled": 5,
+          "completed": 3,
+          "incomplete": 2,
+          "certified": 2,
+          "revoked": 0,
+          "eligible": 1
+        },
+        "items": [
+          {
+            "learnerId": 8,
+            "learnerName": "Alex Lee",
+            "enrollmentId": 16,
+            "enrollmentStatus": "completed",
+            "completedAt": "2026-01-09T06:00:00.000Z",
+            "completedLocal": "2026-01-09 14:00",
+            "certificateId": 8,
+            "serialNumber": "WEST-0000001",
+            "certificateStatus": "active",
+            "eligible": false,
+            "reason": "already_certified",
+            "message": "Already certified (certificate WEST-0000001)"
+          },
+          {
+            "learnerId": 10,
+            "learnerName": "Emily Davis",
+            "enrollmentId": 18,
+            "enrollmentStatus": "completed",
+            "completedAt": "2026-11-18T03:50:00.000Z",
+            "completedLocal": "2026-11-18 11:50",
+            "certificateId": null,
+            "serialNumber": null,
+            "certificateStatus": null,
+            "eligible": true,
+            "reason": null,
+            "message": "Completed, not yet certified"
+          },
+          {
+            "learnerId": 12,
+            "learnerName": "Grace Kim",
+            "enrollmentId": 20,
+            "enrollmentStatus": "not_started",
+            "completedAt": null,
+            "completedLocal": null,
+            "certificateId": null,
+            "serialNumber": null,
+            "certificateStatus": null,
+            "eligible": false,
+            "reason": "not_completed",
+            "message": "Course not completed (enrollment is not started)"
+          },
+          {
+            "learnerId": 9,
+            "learnerName": "Jordan Smith",
+            "enrollmentId": 17,
+            "enrollmentStatus": "completed",
+            "completedAt": "2026-11-16T07:15:00.000Z",
+            "completedLocal": "2026-11-16 15:15",
+            "certificateId": 14,
+            "serialNumber": "WEST-0000005",
+            "certificateStatus": "active",
+            "eligible": false,
+            "reason": "already_certified",
+            "message": "Already certified (certificate WEST-0000005)"
+          },
+          {
+            "learnerId": 11,
+            "learnerName": "Noah Wilson",
+            "enrollmentId": 19,
+            "enrollmentStatus": "in_progress",
+            "completedAt": null,
+            "completedLocal": null,
+            "certificateId": null,
+            "serialNumber": null,
+            "certificateStatus": null,
+            "eligible": false,
+            "reason": "not_completed",
+            "message": "Course not completed (enrollment is in progress)"
+          }
+        ],
+        "page": 1,
+        "pageSize": 50,
+        "total": 5,
+        "totalPages": 1
+      },
+      "operationsAfter": [
+        {
+          "id": 3,
+          "status": "completed",
+          "course": {
+            "id": 4,
+            "title": "Safety 101"
+          },
+          "idempotencyKey": "fixture-key-3",
+          "requestedBy": "bob@west.test",
+          "createdAt": "2026-11-23T19:28:00.843Z",
+          "createdLocal": "2026-11-24 03:28",
+          "summary": {
+            "total": 5,
+            "issued": 1,
+            "skipped": 3,
+            "failed": 1
+          }
+        }
+      ],
+      "certificatesAfter": [
+        {
+          "id": 8,
+          "serialNumber": "WEST-0000001",
+          "learnerId": 8,
+          "learnerName": "Alex Lee",
+          "courseId": 4,
+          "courseTitle": "Safety 101",
+          "status": "active",
+          "issuedAt": "2026-01-10T13:30:00.000Z",
+          "issuedLocal": "2026-01-10 21:30",
+          "issuedLocalDate": "2026-01-10"
+        },
+        {
+          "id": 9,
+          "serialNumber": "WEST-0000002",
+          "learnerId": 13,
+          "learnerName": "Liam Brown",
+          "courseId": 5,
+          "courseTitle": "Working at Heights",
+          "status": "active",
+          "issuedAt": "2026-03-20T17:45:00.000Z",
+          "issuedLocal": "2026-03-21 01:45",
+          "issuedLocalDate": "2026-03-21"
+        },
+        {
+          "id": 10,
+          "serialNumber": "WEST-0000003",
+          "learnerId": 12,
+          "learnerName": "Grace Kim",
+          "courseId": 5,
+          "courseTitle": "Working at Heights",
+          "status": "revoked",
+          "issuedAt": "2026-08-01T03:00:00.000Z",
+          "issuedLocal": "2026-08-01 11:00",
+          "issuedLocalDate": "2026-08-01"
+        },
+        {
+          "id": 11,
+          "serialNumber": "WEST-0000004",
+          "learnerId": 10,
+          "learnerName": "Emily Davis",
+          "courseId": 6,
+          "courseTitle": "Manual Handling",
+          "status": "active",
+          "issuedAt": "2026-09-12T10:20:00.000Z",
+          "issuedLocal": "2026-09-12 18:20",
+          "issuedLocalDate": "2026-09-12"
+        },
+        {
+          "id": 14,
+          "serialNumber": "WEST-0000005",
+          "learnerId": 9,
+          "learnerName": "Jordan Smith",
+          "courseId": 4,
+          "courseTitle": "Safety 101",
+          "status": "active",
+          "issuedAt": "2026-11-23T19:28:00.843Z",
+          "issuedLocal": "2026-11-24 03:28",
+          "issuedLocalDate": "2026-11-24"
+        }
+      ]
+    }
+  },
+  "revoke": {
+    "actor": "alice@east.test",
+    "certificateId": 4,
+    "response": {
+      "id": 4,
+      "serialNumber": "EAST-0000004",
+      "learnerId": 7,
+      "learnerName": "José Álvarez",
+      "courseId": 2,
+      "courseTitle": "First Aid Refresher",
+      "status": "revoked",
+      "issuedAt": "2026-04-04T16:30:00.000Z",
+      "issuedLocal": "2026-04-05 02:30",
+      "issuedLocalDate": "2026-04-05",
+      "issuedUtcOffset": "+10:00",
+      "issuedBy": "alice@east.test",
+      "bulkOperationId": null,
+      "revokedAt": "2026-11-23T19:28:00.851Z",
+      "revokedLocal": "2026-11-24 06:28",
+      "revokedBy": "alice@east.test",
+      "revocationReason": "Issued in error",
+      "tenant": {
+        "name": "East",
+        "timezone": "Australia/Sydney"
+      },
+      "auditEvents": [
+        {
+          "id": 5,
+          "action": "certificate.issued",
+          "actorEmail": "alice@east.test",
+          "certificateId": 4,
+          "bulkOperationId": null,
+          "createdAt": "2026-04-04T16:30:00.000Z",
+          "createdLocal": "2026-04-05 02:30",
+          "details": {
+            "serialNumber": "EAST-0000004",
+            "learnerId": 7,
+            "learnerName": "José Álvarez",
+            "courseId": 2,
+            "courseTitle": "First Aid Refresher",
+            "source": "demo-seed"
+          }
+        },
+        {
+          "id": 17,
+          "action": "certificate.revoked",
+          "actorEmail": "alice@east.test",
+          "certificateId": 4,
+          "bulkOperationId": null,
+          "createdAt": "2026-11-23T19:28:00.851Z",
+          "createdLocal": "2026-11-24 06:28",
+          "details": {
+            "serialNumber": "EAST-0000004",
+            "reason": "Issued in error",
+            "previousStatus": "active"
+          }
+        }
+      ],
+      "alreadyRevoked": false
+    },
+    "repeat": {
+      "id": 4,
+      "serialNumber": "EAST-0000004",
+      "learnerId": 7,
+      "learnerName": "José Álvarez",
+      "courseId": 2,
+      "courseTitle": "First Aid Refresher",
+      "status": "revoked",
+      "issuedAt": "2026-04-04T16:30:00.000Z",
+      "issuedLocal": "2026-04-05 02:30",
+      "issuedLocalDate": "2026-04-05",
+      "issuedUtcOffset": "+10:00",
+      "issuedBy": "alice@east.test",
+      "bulkOperationId": null,
+      "revokedAt": "2026-11-23T19:28:00.851Z",
+      "revokedLocal": "2026-11-24 06:28",
+      "revokedBy": "alice@east.test",
+      "revocationReason": "Issued in error",
+      "tenant": {
+        "name": "East",
+        "timezone": "Australia/Sydney"
+      },
+      "auditEvents": [
+        {
+          "id": 5,
+          "action": "certificate.issued",
+          "actorEmail": "alice@east.test",
+          "certificateId": 4,
+          "bulkOperationId": null,
+          "createdAt": "2026-04-04T16:30:00.000Z",
+          "createdLocal": "2026-04-05 02:30",
+          "details": {
+            "serialNumber": "EAST-0000004",
+            "learnerId": 7,
+            "learnerName": "José Álvarez",
+            "courseId": 2,
+            "courseTitle": "First Aid Refresher",
+            "source": "demo-seed"
+          }
+        },
+        {
+          "id": 17,
+          "action": "certificate.revoked",
+          "actorEmail": "alice@east.test",
+          "certificateId": 4,
+          "bulkOperationId": null,
+          "createdAt": "2026-11-23T19:28:00.851Z",
+          "createdLocal": "2026-11-24 06:28",
+          "details": {
+            "serialNumber": "EAST-0000004",
+            "reason": "Issued in error",
+            "previousStatus": "active"
+          }
+        }
+      ],
+      "alreadyRevoked": true
+    }
+  },
+  "manyCertificates": {
+    "actor": "alice@east.test",
+    "items": [
+      {
+        "id": 1,
+        "serialNumber": "EAST-0000001",
+        "learnerId": 1,
+        "learnerName": "Alex Lee",
+        "courseId": 1,
+        "courseTitle": "Safety 101",
+        "status": "active",
+        "issuedAt": "2026-01-10T13:30:00.000Z",
+        "issuedLocal": "2026-01-11 00:30",
+        "issuedLocalDate": "2026-01-11"
+      },
+      {
+        "id": 2,
+        "serialNumber": "EAST-0000002",
+        "learnerId": 4,
+        "learnerName": "Mei Chen",
+        "courseId": 2,
+        "courseTitle": "First Aid Refresher",
+        "status": "revoked",
+        "issuedAt": "2026-02-14T22:15:00.000Z",
+        "issuedLocal": "2026-02-15 09:15",
+        "issuedLocalDate": "2026-02-15"
+      },
+      {
+        "id": 3,
+        "serialNumber": "EAST-0000003",
+        "learnerId": 6,
+        "learnerName": "Sofia Rossi",
+        "courseId": 2,
+        "courseTitle": "First Aid Refresher",
+        "status": "active",
+        "issuedAt": "2026-04-04T15:30:00.000Z",
+        "issuedLocal": "2026-04-05 02:30",
+        "issuedLocalDate": "2026-04-05"
+      },
+      {
+        "id": 4,
+        "serialNumber": "EAST-0000004",
+        "learnerId": 7,
+        "learnerName": "José Álvarez",
+        "courseId": 2,
+        "courseTitle": "First Aid Refresher",
+        "status": "revoked",
+        "issuedAt": "2026-04-04T16:30:00.000Z",
+        "issuedLocal": "2026-04-05 02:30",
+        "issuedLocalDate": "2026-04-05"
+      },
+      {
+        "id": 5,
+        "serialNumber": "EAST-0000005",
+        "learnerId": 2,
+        "learnerName": "Priya Sharma",
+        "courseId": 3,
+        "courseTitle": "Forklift Operations",
+        "status": "active",
+        "issuedAt": "2026-06-15T02:00:00.000Z",
+        "issuedLocal": "2026-06-15 12:00",
+        "issuedLocalDate": "2026-06-15"
+      },
+      {
+        "id": 6,
+        "serialNumber": "EAST-0000006",
+        "learnerId": 3,
+        "learnerName": "Marcus O'Connor",
+        "courseId": 3,
+        "courseTitle": "Forklift Operations",
+        "status": "active",
+        "issuedAt": "2026-10-03T15:30:00.000Z",
+        "issuedLocal": "2026-10-04 01:30",
+        "issuedLocalDate": "2026-10-04"
+      },
+      {
+        "id": 7,
+        "serialNumber": "EAST-0000007",
+        "learnerId": 5,
+        "learnerName": "Tom Walker",
+        "courseId": 3,
+        "courseTitle": "Forklift Operations",
+        "status": "active",
+        "issuedAt": "2026-10-03T16:30:00.000Z",
+        "issuedLocal": "2026-10-04 03:30",
+        "issuedLocalDate": "2026-10-04"
+      },
+      {
+        "id": 12,
+        "serialNumber": "EAST-0000008",
+        "learnerId": 3,
+        "learnerName": "Marcus O'Connor",
+        "courseId": 1,
+        "courseTitle": "Safety 101",
+        "status": "active",
+        "issuedAt": "2026-11-23T19:28:00.837Z",
+        "issuedLocal": "2026-11-24 06:28",
+        "issuedLocalDate": "2026-11-24"
+      },
+      {
+        "id": 13,
+        "serialNumber": "EAST-0000009",
+        "learnerId": 2,
+        "learnerName": "Priya Sharma",
+        "courseId": 1,
+        "courseTitle": "Safety 101",
+        "status": "active",
+        "issuedAt": "2026-11-23T19:28:00.837Z",
+        "issuedLocal": "2026-11-24 06:28",
+        "issuedLocalDate": "2026-11-24"
+      },
+      {
+        "id": 15,
+        "serialNumber": "EAST-LT-0000001",
+        "learnerId": 14,
+        "learnerName": "Sophie Hughes",
+        "courseId": 7,
+        "courseTitle": "Asbestos Awareness (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 16,
+        "serialNumber": "EAST-LT-0000002",
+        "learnerId": 15,
+        "learnerName": "Anika Bennett",
+        "courseId": 16,
+        "courseTitle": "Site Induction (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 17,
+        "serialNumber": "EAST-LT-0000003",
+        "learnerId": 15,
+        "learnerName": "Anika Bennett",
+        "courseId": 15,
+        "courseTitle": "Noise and Hearing (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 18,
+        "serialNumber": "EAST-LT-0000004",
+        "learnerId": 15,
+        "learnerName": "Anika Bennett",
+        "courseId": 14,
+        "courseTitle": "Ladder Safety (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 19,
+        "serialNumber": "EAST-LT-0000005",
+        "learnerId": 15,
+        "learnerName": "Anika Bennett",
+        "courseId": 13,
+        "courseTitle": "Hazard Identification (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 20,
+        "serialNumber": "EAST-LT-0000006",
+        "learnerId": 15,
+        "learnerName": "Anika Bennett",
+        "courseId": 12,
+        "courseTitle": "Fire Extinguisher Use (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 21,
+        "serialNumber": "EAST-LT-0000007",
+        "learnerId": 15,
+        "learnerName": "Anika Bennett",
+        "courseId": 11,
+        "courseTitle": "Emergency Warden (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 22,
+        "serialNumber": "EAST-LT-0000008",
+        "learnerId": 15,
+        "learnerName": "Anika Bennett",
+        "courseId": 10,
+        "courseTitle": "Electrical Safety (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 23,
+        "serialNumber": "EAST-LT-0000009",
+        "learnerId": 15,
+        "learnerName": "Anika Bennett",
+        "courseId": 9,
+        "courseTitle": "Confined Spaces (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 24,
+        "serialNumber": "EAST-LT-0000010",
+        "learnerId": 15,
+        "learnerName": "Anika Bennett",
+        "courseId": 8,
+        "courseTitle": "Chemical Handling (load test)",
+        "status": "revoked",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 25,
+        "serialNumber": "EAST-LT-0000011",
+        "learnerId": 15,
+        "learnerName": "Anika Bennett",
+        "courseId": 7,
+        "courseTitle": "Asbestos Awareness (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 26,
+        "serialNumber": "EAST-LT-0000012",
+        "learnerId": 14,
+        "learnerName": "Sophie Hughes",
+        "courseId": 16,
+        "courseTitle": "Site Induction (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 27,
+        "serialNumber": "EAST-LT-0000013",
+        "learnerId": 14,
+        "learnerName": "Sophie Hughes",
+        "courseId": 15,
+        "courseTitle": "Noise and Hearing (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 28,
+        "serialNumber": "EAST-LT-0000014",
+        "learnerId": 14,
+        "learnerName": "Sophie Hughes",
+        "courseId": 14,
+        "courseTitle": "Ladder Safety (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 29,
+        "serialNumber": "EAST-LT-0000015",
+        "learnerId": 14,
+        "learnerName": "Sophie Hughes",
+        "courseId": 13,
+        "courseTitle": "Hazard Identification (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 30,
+        "serialNumber": "EAST-LT-0000016",
+        "learnerId": 14,
+        "learnerName": "Sophie Hughes",
+        "courseId": 12,
+        "courseTitle": "Fire Extinguisher Use (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 31,
+        "serialNumber": "EAST-LT-0000017",
+        "learnerId": 14,
+        "learnerName": "Sophie Hughes",
+        "courseId": 11,
+        "courseTitle": "Emergency Warden (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 32,
+        "serialNumber": "EAST-LT-0000018",
+        "learnerId": 14,
+        "learnerName": "Sophie Hughes",
+        "courseId": 10,
+        "courseTitle": "Electrical Safety (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 33,
+        "serialNumber": "EAST-LT-0000019",
+        "learnerId": 14,
+        "learnerName": "Sophie Hughes",
+        "courseId": 9,
+        "courseTitle": "Confined Spaces (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      },
+      {
+        "id": 34,
+        "serialNumber": "EAST-LT-0000020",
+        "learnerId": 14,
+        "learnerName": "Sophie Hughes",
+        "courseId": 8,
+        "courseTitle": "Chemical Handling (load test)",
+        "status": "active",
+        "issuedAt": "2025-09-20T09:39:24.000Z",
+        "issuedLocal": "2025-09-20 19:39",
+        "issuedLocalDate": "2025-09-20"
+      }
+    ]
+  }
+}

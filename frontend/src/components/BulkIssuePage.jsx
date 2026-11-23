@@ -1,5 +1,7 @@
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 
+import { writeOutcome } from '../api.js';
+import { useBulkIssue } from '../bulkIssueStore.js';
 import { useQuery } from '../hooks.js';
 import { EmptyState, ErrorState, OutcomeBadge, Pagination, Spinner, StatusBadge } from './ui.jsx';
 
@@ -17,7 +19,7 @@ function newIdempotencyKey() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function OperationResult({ operation, replayed, onDismiss }) {
+function OperationResult({ operation, replayed, onDismiss, headingId = 'result-heading' }) {
   const [filter, setFilter] = useState('all');
   const [showAll, setShowAll] = useState(false);
   const { summary } = operation;
@@ -25,10 +27,11 @@ function OperationResult({ operation, replayed, onDismiss }) {
   const visible = showAll ? matching : matching.slice(0, RESULT_PREVIEW_ROWS);
 
   return (
-    <section className="panel" aria-labelledby="result-heading" data-testid="operation-result">
+    <section className="panel" aria-labelledby={headingId} data-testid="operation-result">
       <div className="panel-header">
         <div>
-          <h2 id="result-heading">
+          {/* Focusable by script only: see viewOperation in BulkIssuePage. */}
+          <h2 id={headingId} tabIndex={-1}>
             Operation #{operation.id} · {operation.course.title}
           </h2>
           <p className="muted">
@@ -145,46 +148,50 @@ function OperationResult({ operation, replayed, onDismiss }) {
   );
 }
 
-export default function BulkIssuePage({ api, actor }) {
-  const courses = useQuery((signal) => api.listCourses(signal), [api]);
-  const operations = useQuery((signal) => api.listOperations(signal), [api]);
+export default function BulkIssuePage({ api, actor, bulkIssues }) {
+  // run: idle | submitting | succeeded | failed. `attempt` = { courseId, courseTitle, key }.
+  // The run, its key and the in-flight lock live in the store above the routed pages, so they are
+  // still there when this page is left and opened again (see bulkIssueStore.js).
+  const { run, settled } = useBulkIssue(bulkIssues, actor.email);
 
-  const [courseId, setCourseId] = useState('');
+  const courses = useQuery((signal) => api.listCourses(signal), [api]);
+  // `settled` moves whenever a bulk issue of this actor finishes - also one that was started
+  // before this page was (re)opened - so the history and the roster below are fetched again.
+  const operations = useQuery((signal) => api.listOperations(signal), [api, settled]);
+
+  // Coming back to a run that is pending or still on display: start on the course it is about.
+  const [courseId, setCourseId] = useState(() => (run.status === 'idle' ? '' : String(run.attempt.courseId)));
   const [rosterPage, setRosterPage] = useState(1);
   const roster = useQuery(
     (signal) => (courseId ? api.getRoster(courseId, rosterPage, signal) : Promise.resolve(null)),
-    [api, courseId, rosterPage],
+    [api, courseId, rosterPage, settled],
   );
 
-  // run: idle | submitting | succeeded | failed. `attempt` = { courseId, courseTitle, key }.
-  const [run, setRun] = useState({ status: 'idle' });
-  const inFlight = useRef(false);
-  const [viewed, setViewed] = useState({ status: 'idle' }); // a past operation opened from the history
+  // A past operation opened from the history. Loading it through useQuery cancels the request of
+  // an earlier choice, so a slow answer can never replace the operation that was selected last.
+  const [viewedId, setViewedId] = useState(null);
+  const viewed = useQuery(
+    (signal) => (viewedId === null ? Promise.resolve(null) : api.getOperation(viewedId, signal)),
+    [api, viewedId],
+  );
 
   const selectedCourse = courses.data?.find((course) => String(course.id) === courseId) ?? null;
   const rosterData = roster.status !== 'error' && roster.data?.course.id === selectedCourse?.id ? roster.data : null;
   const eligible = rosterData?.summary.eligible ?? 0;
   const submitting = run.status === 'submitting';
-  const awaitingRetryDecision = run.status === 'failed' && run.error.retryable;
+  // Why the run failed decides what may be said about it; only a 4xx is a definite "rejected".
+  const failure = run.status === 'failed' ? writeOutcome(run.error) : null;
+  const awaitingRetryDecision = failure === 'not_run' || failure === 'unknown';
 
-  async function submit(attempt) {
-    // The ref closes the gap between the click and React disabling the button: a double click
-    // (or Enter + click) can never start two requests. Should a duplicate still reach the server
-    // (e.g. a retry after a timeout), the idempotency key makes it harmless.
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setViewed({ status: 'idle' });
-    setRun({ status: 'submitting', attempt });
-    try {
-      const { operation, replayed } = await api.bulkIssue(attempt.courseId, attempt.key);
-      setRun({ status: 'succeeded', attempt, operation, replayed });
-    } catch (error) {
-      setRun({ status: 'failed', attempt, error });
-    } finally {
-      inFlight.current = false;
-      roster.reload();
-      operations.reload();
-    }
+  const runResultId = run.status === 'succeeded' ? run.operation.id : null;
+  // The result of the run is on screen already: never a second panel for the same operation.
+  const showViewed = viewedId !== null && viewedId !== runResultId;
+  const viewedOperation = viewed.status === 'success' && viewed.data?.id === viewedId ? viewed.data : null;
+
+  function submit(attempt) {
+    setViewedId(null);
+    // The store refuses a second request while one is in flight (double click, Enter + click).
+    bulkIssues.submit(api, attempt);
   }
 
   function startIssue() {
@@ -193,18 +200,33 @@ export default function BulkIssuePage({ api, actor }) {
   }
 
   function changeCourse(nextId) {
+    // Choosing the course that is already selected is not a new choice and must not discard the
+    // status on screen. (A browser sends no change event for it; a script driving the page can.)
+    if (nextId === courseId) return;
     setCourseId(nextId);
     setRosterPage(1);
-    setViewed({ status: 'idle' });
-    if (!submitting) setRun({ status: 'idle' });
+    setViewedId(null);
+    bulkIssues.dismiss(actor.email); // a request in flight stays; the select is locked then anyway
   }
 
-  async function viewOperation(id) {
-    setViewed({ status: 'loading', id });
-    try {
-      setViewed({ status: 'success', id, operation: await api.getOperation(id) });
-    } catch (error) {
-      setViewed({ status: 'error', id, error });
+  function dismissRun() {
+    if (viewedId === runResultId) setViewedId(null); // or the hidden copy would pop up in its place
+    bulkIssues.dismiss(actor.email);
+  }
+
+  function viewOperation(id) {
+    if (id === runResultId) {
+      // Its outcomes are on screen as the result of the run: point there instead of opening a copy.
+      // Moving the focus is what makes the click perceivable when the panel is in view already:
+      // a screen reader announces the heading, and styles.css outlines it.
+      setViewedId(null);
+      const heading = document.getElementById('result-heading');
+      heading?.scrollIntoView?.({ block: 'nearest' });
+      heading?.focus();
+    } else if (id === viewedId) {
+      viewed.reload();
+    } else {
+      setViewedId(id);
     }
   }
 
@@ -279,14 +301,14 @@ export default function BulkIssuePage({ api, actor }) {
               </div>
               <div className="state-body">
                 <strong>
-                  {run.error.code === 'database_busy'
+                  {failure === 'not_run'
                     ? `The bulk issue for ${run.attempt.courseTitle} has not run yet`
-                    : run.error.retryable
+                    : failure === 'unknown'
                       ? `The bulk issue for ${run.attempt.courseTitle} may or may not have gone through`
                       : `The bulk issue for ${run.attempt.courseTitle} was rejected`}
                 </strong>
-                <p>{run.error.message}</p>
-                {run.error.retryable ? (
+                <p>{run.error?.message || 'Unexpected error'}</p>
+                {awaitingRetryDecision ? (
                   <p className="muted small">
                     Retrying is safe: the request is repeated with the same idempotency key, so learners are never
                     certified twice.
@@ -294,12 +316,12 @@ export default function BulkIssuePage({ api, actor }) {
                 ) : null}
               </div>
               <div className="state-actions">
-                {run.error.retryable ? (
+                {awaitingRetryDecision ? (
                   <button type="button" className="btn btn-primary" onClick={() => submit(run.attempt)} data-testid="retry-button">
                     Retry safely
                   </button>
                 ) : null}
-                <button type="button" className="btn" onClick={() => setRun({ status: 'idle' })}>
+                <button type="button" className="btn" onClick={dismissRun}>
                   Dismiss
                 </button>
               </div>
@@ -412,23 +434,28 @@ export default function BulkIssuePage({ api, actor }) {
           key={`run-${run.operation.id}-${run.attempt.key}`}
           operation={run.operation}
           replayed={run.replayed}
-          onDismiss={() => setRun({ status: 'idle' })}
+          onDismiss={dismissRun}
         />
       ) : null}
 
-      {viewed.status === 'loading' ? (
+      {!showViewed ? null : viewed.status === 'error' ? (
         <section className="panel">
-          <Spinner label={`Loading operation #${viewed.id}…`} />
+          <ErrorState title={`Operation #${viewedId} could not be loaded`} error={viewed.error} onRetry={viewed.reload} />
         </section>
-      ) : null}
-      {viewed.status === 'error' ? (
+      ) : !viewedOperation ? (
         <section className="panel">
-          <ErrorState title={`Operation #${viewed.id} could not be loaded`} error={viewed.error} onRetry={() => viewOperation(viewed.id)} />
+          <Spinner label={`Loading operation #${viewedId}…`} />
         </section>
-      ) : null}
-      {viewed.status === 'success' ? (
-        <OperationResult key={`viewed-${viewed.id}`} operation={viewed.operation} replayed={false} onDismiss={() => setViewed({ status: 'idle' })} />
-      ) : null}
+      ) : (
+        <OperationResult
+          key={`viewed-${viewedId}`}
+          // Shown below the result of a run, it must not repeat that panel's heading id.
+          headingId={run.status === 'succeeded' ? 'viewed-result-heading' : 'result-heading'}
+          operation={viewedOperation}
+          replayed={false}
+          onDismiss={() => setViewedId(null)}
+        />
+      )}
 
       <section className="panel" aria-labelledby="history-heading">
         <div className="panel-header">

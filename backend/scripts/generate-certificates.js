@@ -10,13 +10,17 @@
  * Safe to run while the server is up: the rows are written in one transaction and the running
  * app shows them on the next request. The quick-start demo rows are never modified.
  *
- * Every problem ends in a short message (no stack trace) and exit code 1; nothing is written then.
+ * Every problem ends in a short message (no stack trace) and exit code 1, and nothing is written
+ * then: the arguments are checked before the database is touched, so a mistyped count or tenant
+ * does not even leave a new, empty database file behind.
  */
+import fs from 'node:fs';
 import { parseArgs } from 'node:util';
 
 import { openInitializedDatabase } from '../src/bootstrap.js';
 import { loadConfig, resolveUserPath } from '../src/config.js';
-import { clearGeneratedCertificates, generateCertificates } from '../src/db/generate.js';
+import { MAX_GENERATED_CERTIFICATES, clearGeneratedCertificates, generateCertificates } from '../src/db/generate.js';
+import { DEMO_TENANT_NAMES } from '../src/db/seed.js';
 import { checkDatabaseSettings } from '../src/db/sqlite.js';
 
 const USAGE = 'Usage: node scripts/generate-certificates.js [--tenant East] [--count 100000] [--seed N] [--db path] [--clear]';
@@ -50,16 +54,33 @@ if (values.help) {
 
 const count = Number(values.count);
 const seed = Number(values.seed);
-if (!Number.isInteger(count) || count < 1) fail(`--count must be a positive integer (got "${values.count}")`);
+if (!Number.isInteger(count) || count < 1 || count > MAX_GENERATED_CERTIFICATES) {
+  fail(`--count must be a whole number between 1 and ${MAX_GENERATED_CERTIFICATES.toLocaleString('en-US')} (got "${values.count}")`);
+}
 if (!Number.isInteger(seed)) fail(`--seed must be an integer (got "${values.seed}")`);
+if (values.db !== undefined && values.db.trim() === '') fail(`--db needs a path (got an empty value)\n${USAGE}`);
 
 let dbPath;
 let db;
 try {
   checkDatabaseSettings(); // SQLITE_DRIVER, DB_BUSY_TIMEOUT_MS
-  dbPath = values.db ? resolveUserPath(values.db) : loadConfig().dbPath;
+  dbPath = values.db !== undefined ? resolveUserPath(values.db) : loadConfig().dbPath;
 } catch (err) {
   fail(err.message);
+}
+// A database that does not exist yet (or is still an empty file) gets the demo data when it is
+// opened, so its tenants are known in advance; in any other database the tenant is looked up
+// before anything is changed.
+function isNewDatabase(file) {
+  try {
+    return fs.statSync(file).size === 0;
+  } catch {
+    return true; // no such file
+  }
+}
+const isDemoTenant = DEMO_TENANT_NAMES.some((name) => name.toLowerCase() === values.tenant.toLowerCase());
+if (!isDemoTenant && isNewDatabase(dbPath)) {
+  fail(`Unknown tenant "${values.tenant}" (a new database has the tenants ${DEMO_TENANT_NAMES.join(' and ')})`);
 }
 try {
   db = openInitializedDatabase(dbPath, { log: console.log });

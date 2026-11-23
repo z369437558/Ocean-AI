@@ -195,7 +195,12 @@ export async function bulkIssue(db, actor, { body, idempotencyKey }, { now = () 
         });
       } catch (err) {
         if (err instanceof TransactionAbortedError) throw err; // nothing can be salvaged; fail the request
-        logger.error(`[bulk-issue] operation ${operationId}: learner ${row.learner_id} failed:`, err);
+        // The cause is for the operator: the first failure of an operation is logged in full, every
+        // further one in a single line. (When a whole roster fails for the same reason, thousands
+        // of identical stack traces would be written while the write lock is held.)
+        const failure = `[bulk-issue] operation ${operationId}: learner ${row.learner_id} failed:`;
+        if (summary.failed === 0) logger.error(failure, err);
+        else logger.error(`${failure} ${err?.message ?? err}`);
         summary.failed += 1;
         results.push({ ...base, outcome: 'failed', reason: 'issue_failed', message: FAILURE_MESSAGE });
       }

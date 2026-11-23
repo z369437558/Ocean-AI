@@ -4,13 +4,12 @@
  * The list endpoint and the export share one filter + ordering builder, so an export always
  * contains exactly the rows (and the order) the admin is looking at.
  */
-import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
-
 import { csvRow } from '../lib/csv.js';
 import { badRequest, notFound } from '../lib/errors.js';
-import { assertPlainText, queryInteger, queryString } from '../lib/params.js';
+import { assertPlainText, queryInteger, queryString, textLength } from '../lib/params.js';
 import { foldText } from '../lib/text.js';
 import { createLocalDateTimeFormatter, localDateTime, utcOffset } from '../lib/time.js';
+import { createTurnQueue } from '../lib/turns.js';
 import { AUDIT_ACTIONS, revokeCertificate } from './ledger.js';
 
 export const DEFAULT_PAGE_SIZE = 25;
@@ -74,6 +73,9 @@ const KNOWN_AUDIT_ACTIONS = Object.values(AUDIT_ACTIONS);
 /**
  * Validates list/export query parameters. Unknown values are rejected rather than silently
  * ignored; a parameter that is present but blank counts as not given.
+ *
+ * The export has no pages (`paginate: false`): it does not look at `page` and `pageSize`, so the
+ * query string of a list request can be reused for the export of the same rows as it is.
  */
 export function parseListQuery(query, { paginate = true } = {}) {
   const q = queryString(query, ['q', 'search'], { maxLength: 100 }) ?? '';
@@ -259,7 +261,7 @@ function parseRevocationReason(body) {
   if (typeof reason !== 'string') throw badRequest('"reason" must be a string');
   assertPlainText(reason, '"reason"', { allowLineBreaks: true });
   const text = reason.trim();
-  if (text.length > MAX_REASON_LENGTH) throw badRequest(`"reason" must be at most ${MAX_REASON_LENGTH} characters`);
+  if (textLength(text) > MAX_REASON_LENGTH) throw badRequest(`"reason" must be at most ${MAX_REASON_LENGTH} characters`);
   return text || null;
 }
 
@@ -357,8 +359,15 @@ export function listAuditEvents(db, actor, query) {
 // CSV export
 // ---------------------------------------------------------------------------------------------
 
-/** Rows the export looks at between two visits to the event loop (matching the filter or not). */
+/** Rows an export looks at in one step (matching the filter or not). */
 export const EXPORT_BATCH_ROWS = 500;
+
+/**
+ * All exports of this process take their steps through one queue: one step per event-loop
+ * iteration in total, not one per export, so the pause other requests see stays one step long
+ * however many exports are running.
+ */
+const exportTurns = createTurnQueue();
 
 /**
  * Query + metadata for an export of everything the given list filters match (no pagination).
@@ -385,32 +394,42 @@ export function buildExportPlan(actor, options) {
 /**
  * Streams the export as CSV text chunks.
  *
- * `reader` must be a dedicated connection. The whole export runs inside one read transaction on
- * it, i.e. against a single consistent snapshot, while the server's main connection keeps serving
- * other requests (WAL readers never block each other or the writer).
+ * `openReader` opens a dedicated connection for this export; the export closes it again. The
+ * whole export runs inside one read transaction on it, i.e. against a single consistent snapshot,
+ * while the server's main connection keeps serving other requests (WAL readers never block each
+ * other or the writer).
  *
  * SQLite calls are synchronous, so the export must never do much in one go. It walks the tenant's
- * rows in the requested order and hands control back to the event loop after every `batchRows`
- * rows it has LOOKED AT. That is why the filter is evaluated as a column instead of in WHERE: with
- * a filter in WHERE, fetching "the next matching row" can mean scanning the rest of the table in
- * a single call when few rows match, and every other request would wait for that scan. This way
- * the work between two visits to the event loop is the same small amount whether the filter
- * matches every row or none.
+ * rows in the requested order in steps of `batchRows` rows it has LOOKED AT, and waits for its
+ * turn on the event loop before every step (lib/turns.js); opening the connection is part of the
+ * first step. That is why the filter is evaluated as a column instead of in WHERE: with a filter
+ * in WHERE, fetching "the next matching row" can mean scanning the rest of the table in a single
+ * call when few rows match, and every other request would wait for that scan. This way a step is
+ * the same small amount of work whether the filter matches every row or none.
  *
  * Memory stays flat: nothing but the current batch is ever buffered, and the consumer's
  * back-pressure decides how fast the next batch is fetched.
+ *
+ * `signal` (optional) abandons the export: it stops before its next step instead of reading on
+ * for a client that has gone. An abandoned export simply ends; it does not throw.
  */
-export async function* streamCsvExport(reader, plan, { batchRows = EXPORT_BATCH_ROWS } = {}) {
+export async function* streamCsvExport(openReader, plan, { batchRows = EXPORT_BATCH_ROWS, signal } = {}) {
   const formatIssued = createLocalDateTimeFormatter(plan.timeZone);
-  let rows;
-  reader.exec('BEGIN');
+  let reader = null;
+  let rows = null;
   try {
-    rows = reader.iterate(plan.sql, plan.params);
     // The header travels with the first batch: by the time the first chunk exists the query has
     // run and the snapshot is pinned, so a failure to start can still be reported as a proper error.
     let chunk = csvRow(plan.header);
 
     for (;;) {
+      await exportTurns.next();
+      if (signal?.aborted) return;
+      if (!reader) {
+        reader = openReader();
+        reader.exec('BEGIN');
+        rows = reader.iterate(plan.sql, plan.params);
+      }
       let done = false;
       for (let i = 0; i < batchRows; i += 1) {
         const next = rows.next();
@@ -425,19 +444,21 @@ export async function* streamCsvExport(reader, plan, { batchRows = EXPORT_BATCH_
       if (chunk) yield chunk;
       if (done) break;
       chunk = '';
-      await yieldToEventLoop();
     }
   } finally {
-    // Runs on completion, on error, and when the client disconnects mid-download.
+    // Runs on completion, on error, and when the export is abandoned mid-download.
     try {
       rows?.return?.();
     } catch {
       // statement already finished
     }
-    try {
-      reader.exec('ROLLBACK');
-    } catch {
-      // no transaction left to close
+    if (reader) {
+      try {
+        reader.exec('ROLLBACK');
+      } catch {
+        // no transaction left to close
+      }
+      reader.close();
     }
   }
 }

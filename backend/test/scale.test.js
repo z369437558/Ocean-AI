@@ -4,10 +4,12 @@
  * The dataset is produced by the real generator CLI on top of a freshly seeded database, and the
  * server runs as its own process, so timings reflect what a client actually experiences.
  */
+import './support/pin-settings.mjs'; // must stay first: see the file
+
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { after, before, describe, it } from 'node:test';
+import { after, before, describe } from 'node:test';
 
 import { isBusyError, openDatabase } from '../src/db/sqlite.js';
 import {
@@ -18,6 +20,7 @@ import {
   clientFor,
   createTempDir,
   foldedCompare,
+  it,
   openStream,
   parseCsv,
   referenceFold,
@@ -384,7 +387,7 @@ describe('A6 - 100,000-certificate export', { timeout: 300_000 }, () => {
 
       // Either the server drops the stalled download, or - on a machine whose socket buffers are
       // large enough to swallow the whole file - it has simply finished sending it.
-      const dropped = () => impatient.output().includes('[export] download dropped: the client accepted no data for 500 ms');
+      const dropped = () => impatient.output().includes('[export] download dropped: the client took no more data for 500 ms');
       const finished = () => /GET \/api\/certificates\/export\.csv\?sort=serial -> 200/.test(impatient.output());
       await until(() => dropped() || finished(), { timeoutMs: 20_000, label: 'the stalled download to be dropped' });
       if (!dropped()) {

@@ -44,7 +44,8 @@ export function useDebouncedValue(value, delayMs) {
   return [debounced, setDebounced];
 }
 
-function parseHash(hash) {
+/** The route a location hash stands for: { view: 'certificates' | 'bulk-issue', certificateId }. */
+export function parseHash(hash) {
   const segments = hash.replace(/^#/, '').split('?')[0].split('/').filter(Boolean);
   if (segments[0] === 'bulk-issue') return { view: 'bulk-issue', certificateId: null };
   const certificateId = segments[0] === 'certificates' && /^[1-9]\d*$/.test(segments[1] ?? '') ? Number(segments[1]) : null;

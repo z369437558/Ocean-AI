@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { navigate, useDebouncedValue, useQuery } from '../hooks.js';
 import CertificateDetail from './CertificateDetail.jsx';
@@ -27,6 +27,15 @@ const SORT_OPTIONS = [
 
 const PAGE_SIZES = [10, 25, 50, 100];
 
+/**
+ * The search text as it is sent to the server. Pasted text easily carries tabs or line breaks
+ * (two spreadsheet cells, a line of an e-mail) and the server rejects control characters with a
+ * 400, so every run of them - together with the spaces around it - becomes a single space.
+ */
+function toSearchQuery(text) {
+  return text.replace(/ *[\u0000-\u001f\u007f][\u0000-\u001f\u007f ]*/g, ' ').trim();
+}
+
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -35,7 +44,7 @@ function formatBytes(bytes) {
 
 export default function CertificatesPage({ api, actor, selectedCertificateId }) {
   const [searchText, setSearchText] = useState('');
-  const [search, setSearch] = useDebouncedValue(searchText.trim(), 300);
+  const [search, setSearch] = useDebouncedValue(toSearchQuery(searchText), 300);
   const [status, setStatus] = useState('all');
   const [sort, setSort] = useState({ field: 'issued', order: 'desc' });
   const [pageSize, setPageSize] = useState(25);
@@ -59,16 +68,24 @@ export default function CertificatesPage({ api, actor, selectedCertificateId }) 
   }, [list.status, data, page, filterKey]);
 
   const [exportState, setExportState] = useState({ status: 'idle' });
+  // The export belongs to this page. When the page goes away - another tab, another actor - a
+  // download still in flight is cancelled; otherwise the file would be saved later with nothing on
+  // screen to explain it, possibly a file of tenant A while the console is acting as tenant B.
+  const exportAbort = useRef(null);
+  useEffect(() => () => exportAbort.current?.abort(), []);
 
   async function handleExport() {
     if (exportState.status === 'running') return; // one export at a time per window
-    const q = searchText.trim();
+    const q = toSearchQuery(searchText);
     setSearch(q); // apply pending keystrokes now, so the table and the file show the same rows
     setExportState({ status: 'running' });
+    const controller = new AbortController();
+    exportAbort.current = controller;
     try {
-      const result = await api.exportCsv({ q, status, sort: sort.field, order: sort.order });
+      const result = await api.exportCsv({ q, status, sort: sort.field, order: sort.order }, controller.signal);
       setExportState({ status: 'done', ...result });
     } catch (error) {
+      if (controller.signal.aborted) return; // the page is gone: nothing to report, nobody to tell
       setExportState({ status: 'error', error });
     }
   }
@@ -119,7 +136,7 @@ export default function CertificatesPage({ api, actor, selectedCertificateId }) 
           role="search"
           onSubmit={(event) => {
             event.preventDefault();
-            setSearch(searchText.trim());
+            setSearch(toSearchQuery(searchText));
           }}
         >
           <label className="field field-grow">
@@ -174,7 +191,7 @@ export default function CertificatesPage({ api, actor, selectedCertificateId }) 
           {exportState.status === 'running' ? (
             <p className="note">
               Preparing the export for the current search and sort order. Large exports can take a moment; you can keep
-              working meanwhile.
+              working meanwhile. Leaving this page cancels the export.
             </p>
           ) : null}
           {exportState.status === 'done' ? (
