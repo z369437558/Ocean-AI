@@ -1,0 +1,25 @@
+{
+  "name": "certificate-admin-console",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-tenant certificate admin console (Express + SQLite API, React + Vite UI)",
+  "type": "module",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "prestart": "node scripts/preflight.mjs",
+    "start": "npm install --no-audit --no-fund && npm run build --workspace frontend && npm run start --workspace backend",
+    "pretest": "node scripts/preflight.mjs",
+    "test": "npm install --no-audit --no-fund && npm run test --workspace backend",
+    "serve": "npm run start --workspace backend",
+    "build": "npm run build --workspace frontend",
+    "dev": "node scripts/dev.mjs",
+    "db:reset": "npm run db:reset --workspace backend",
+    "generate:east": "npm run generate:east --workspace backend --"
+  }
+}
