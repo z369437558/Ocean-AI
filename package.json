@@ -19,7 +19,7 @@
     "serve": "npm run start --workspace backend",
     "build": "npm run build --workspace frontend",
     "dev": "node scripts/dev.mjs",
-    "db:reset": "npm run db:reset --workspace backend",
+    "db:reset": "npm run db:reset --workspace backend --",
     "generate:east": "npm run generate:east --workspace backend --"
   },
   "allowScripts": {

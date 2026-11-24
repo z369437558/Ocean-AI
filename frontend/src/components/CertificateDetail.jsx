@@ -282,7 +282,10 @@ export default function CertificateDetail({ api, certificateId, onClose, onChang
                     <div className="muted small">UTC: {certificate.revokedAt}</div>
                   </Field>
                   <Field label="Revoked by">{certificate.revokedBy ?? '—'}</Field>
-                  <Field label="Revocation reason">{certificate.revocationReason ?? 'No reason given'}</Field>
+                  <Field label="Revocation reason">
+                    {/* typed into a field of several lines: shown with its line breaks */}
+                    <span className="as-typed">{certificate.revocationReason ?? 'No reason given'}</span>
+                  </Field>
                 </>
               ) : null}
             </dl>
@@ -311,7 +314,12 @@ export default function CertificateDetail({ api, certificateId, onClose, onChang
                   </div>
                   <div className="muted small">
                     {event.createdLocal} ({certificate.tenant.timezone})
-                    {event.details?.reason ? ` · reason: ${event.details.reason}` : ''}
+                    {event.details?.reason ? (
+                      <>
+                        {' · reason: '}
+                        <span className="as-typed">{event.details.reason}</span>
+                      </>
+                    ) : null}
                     {event.bulkOperationId ? ` · bulk operation #${event.bulkOperationId}` : ''}
                   </div>
                 </li>

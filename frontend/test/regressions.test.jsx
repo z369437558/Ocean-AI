@@ -4,6 +4,10 @@
  * in the search) and item G (export in flight when its page goes away).
  * Items A and B live in bulk-issue.test.jsx, item E in detail-revoke.test.jsx.
  */
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -198,14 +202,27 @@ describe('"View outcomes" shows the operation selected last (item C)', () => {
       await screen.findByTestId('operation-result');
       await screen.findByTestId('operation-history');
 
+      // An ordinary click on the heading text does not put the focus (and with it the outline) there.
+      const heading = within(screen.getByTestId('operation-result')).getByRole('heading');
+      await user.click(heading);
+      expect(heading.hasAttribute('tabindex')).toBe(false);
+      expect(document.activeElement).not.toBe(heading);
+
       const button = viewOutcomes(1);
       await user.click(button);
-      const heading = within(screen.getByTestId('operation-result')).getByRole('heading');
+      expect(within(screen.getByTestId('operation-result')).getByRole('heading')).toBe(heading);
       expect(document.activeElement).toBe(heading); // perceivable: announced, and outlined by the stylesheet
       expect(document.activeElement).not.toBe(button);
       expect(heading.getAttribute('tabindex')).toBe('-1'); // reachable by script, not a Tab stop
       expect(scrolled).toEqual([['result-heading', { block: 'nearest' }]]);
       expect(resultHeadings()).toEqual(['Operation #1 · Safety 101']);
+
+      // Once the focus moves on, the heading is an ordinary heading again.
+      await user.click(button);
+      expect(document.activeElement).toBe(heading);
+      await user.click(screen.getByTestId('course-select'));
+      expect(document.activeElement).not.toBe(heading);
+      expect(heading.hasAttribute('tabindex')).toBe(false);
     } finally {
       Element.prototype.scrollIntoView = original;
     }
@@ -619,5 +636,42 @@ describe('An export in flight when its page goes away (item G)', () => {
     await screen.findByTestId('export-done');
     expect(saved).toHaveLength(1);
     expect(server.sent('GET', '/api/certificates/export.csv')[0].aborted).toBe(false);
+  });
+});
+
+describe('What the browser scrolls into view is not parked under the sticky top bar', () => {
+  // The real stylesheet. (Vitest hands out CSS imports empty.)
+  const STYLES = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../src/styles.css'), 'utf8');
+  const reportedHeight = () => document.documentElement.style.getPropertyValue('--topbar-height');
+
+  it('tells the stylesheet how high the bar is while it sticks, 0 where it scrolls away, and nothing once the console is gone', async () => {
+    const sheet = document.createElement('style');
+    sheet.textContent = STYLES;
+    document.head.append(sheet);
+    // The simulated DOM has no layout, so the bar is given a height - with a fraction, as on a zoomed screen.
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function measure() {
+      const height = this.classList.contains('topbar') ? 69.4 : 0;
+      return { x: 0, y: 0, top: 0, left: 0, right: 1024, bottom: height, width: 1024, height };
+    });
+    try {
+      const view = openConsole();
+      await loadedRows();
+      const bar = document.querySelector('.topbar');
+      expect(getComputedStyle(bar).position).toBe('sticky');
+      expect(reportedHeight()).toBe('70px'); // rounded up: not even a sliver of the focused control under the bar
+      // ... which is what the browser keeps clear at the top when it scrolls a control or a heading into view
+      expect(getComputedStyle(document.documentElement).scrollPaddingTop).toBe('calc(70px + 0.75rem)');
+
+      bar.style.position = 'static'; // what the stylesheet does on a small window, where the bar scrolls away
+      act(() => {
+        window.dispatchEvent(new Event('resize'));
+      });
+      expect(reportedHeight()).toBe('0px');
+
+      view.unmount();
+      expect(reportedHeight()).toBe('');
+    } finally {
+      sheet.remove();
+    }
   });
 });

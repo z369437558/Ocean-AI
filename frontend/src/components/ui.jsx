@@ -94,10 +94,75 @@ export function Pagination({ page, totalPages, total, pageSize, itemCount, disab
   );
 }
 
+const TAB_STOPS = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(', ');
+
+/** The elements inside `panel` that the Tab key stops at, in document order. */
+function tabStops(panel) {
+  return [...panel.querySelectorAll(TAB_STOPS)].filter((element) => !element.closest('[hidden], [inert]'));
+}
+
+const comesBefore = (a, b) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+/**
+ * Tab and Shift+Tab stay inside `panel`: wherever the browser's own next step would leave it, the
+ * focus wraps around to the other end instead. Steps between two stops of the panel are left to
+ * the browser.
+ */
+function keepTabInside(event, panel) {
+  const stops = tabStops(panel);
+  if (stops.length === 0) {
+    // Nothing to stop at (every control is disabled while a request runs): stay on the dialog.
+    event.preventDefault();
+    panel.focus();
+    return;
+  }
+  const active = document.activeElement;
+  const from = panel.contains(active) ? active : null; // null: the focus got lost to somewhere outside
+  // The browser's step stays inside when another stop lies in its direction. (From the dialog
+  // itself all stops lie ahead: what an element contains counts as coming after it.)
+  const leaves = event.shiftKey
+    ? from === null || !stops.some((stop) => stop !== from && comesBefore(stop, from))
+    : from === null || !stops.some((stop) => stop !== from && comesBefore(from, stop));
+  if (!leaves) return;
+  event.preventDefault();
+  (event.shiftKey ? stops[stops.length - 1] : stops[0]).focus();
+}
+
+/**
+ * Makes everything around `overlay` inert - out of the Tab order, not clickable, not there for a
+ * screen reader - and returns the function that takes exactly that back. "Around" is every sibling
+ * of the overlay and of each of its ancestors; what is inert already (the page under a dialog that
+ * opened earlier) is left to whoever made it so.
+ */
+function makeRestInert(overlay) {
+  const changed = [];
+  for (let node = overlay; node !== document.body && node.parentElement; node = node.parentElement) {
+    for (const sibling of node.parentElement.children) {
+      if (sibling === node || sibling.hasAttribute('inert')) continue;
+      sibling.setAttribute('inert', '');
+      changed.push(sibling);
+    }
+  }
+  return () => {
+    for (const element of changed) element.removeAttribute('inert');
+  };
+}
+
 /**
  * Modal layer used for the certificate drawer and the revoke confirmation.
- * Escape and a click on the backdrop close it (unless `locked`, e.g. while a request is running);
- * focus moves into the dialog on open and returns to the previously focused element on close.
+ *
+ * - Escape and a click on the backdrop close it (unless `locked`, e.g. while a request is running).
+ * - The focus moves into the dialog on open and returns to the previously focused element on close.
+ * - While it is open it is the only thing that can be operated, as `aria-modal` announces: the rest
+ *   of the page - a dialog underneath included - is inert, and Tab cycles through its own controls.
+ *   So a dialog that is locked cannot be dismissed through the drawer behind it either.
  */
 export function Dialog({ title, onClose, locked = false, variant = 'modal', children, labelledBy, describedBy }) {
   const panelRef = useRef(null);
@@ -108,13 +173,16 @@ export function Dialog({ title, onClose, locked = false, variant = 'modal', chil
 
   useEffect(() => {
     const panel = panelRef.current;
-    const previouslyFocused = document.activeElement;
-    panel?.focus();
+    const previouslyFocused = document.activeElement; // read first: becoming inert takes the focus away
+    const releaseRest = makeRestInert(panel.parentElement);
+    panel.focus();
     const onKeyDown = (event) => {
-      if (event.key !== 'Escape' || lockedRef.current) return;
       // Only the top-most dialog reacts, so Escape closes the confirmation before the drawer.
       const dialogs = document.querySelectorAll('[role="dialog"]');
-      if (dialogs[dialogs.length - 1] === panelRef.current) {
+      if (dialogs[dialogs.length - 1] !== panel) return;
+      if (event.key === 'Tab') {
+        keepTabInside(event, panel);
+      } else if (event.key === 'Escape' && !lockedRef.current) {
         event.stopPropagation();
         onCloseRef.current();
       }
@@ -122,6 +190,7 @@ export function Dialog({ title, onClose, locked = false, variant = 'modal', chil
     document.addEventListener('keydown', onKeyDown);
     return () => {
       document.removeEventListener('keydown', onKeyDown);
+      releaseRest(); // before the focus goes back: nothing inert can take it
       if (previouslyFocused instanceof HTMLElement && document.contains(previouslyFocused)) {
         previouslyFocused.focus();
         return;

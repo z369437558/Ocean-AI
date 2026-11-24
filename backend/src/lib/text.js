@@ -15,8 +15,10 @@
  *   - the Latin letters that Unicode does not describe as "a base letter plus an accent" are
  *     replaced by the usual plain spelling ("ø" -> "o", "ł" -> "l", "ß" -> "ss", ...; see below).
  *
- * Other scripts are compared as written, apart from case: their marks are not accents and stay
- * (Devanagari vowel signs, Hangul, kana voicing marks ...).
+ * "Accents" are the combining marks U+0300-036F wherever they occur, so Greek and Cyrillic letters
+ * lose theirs as well ("ά" -> "α", "й" -> "и"). The marks of other scripts are not accents and
+ * stay (Devanagari vowel signs, kana voicing marks ...): apart from case, those scripts are
+ * compared as written.
  */
 
 /**

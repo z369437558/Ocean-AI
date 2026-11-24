@@ -16,6 +16,21 @@ export function resolveUserPath(value, env = process.env) {
 }
 
 /**
+ * The host name to print in the start-up line: one that actually leads to this server. Listening
+ * on all interfaces (the default, or a wildcard address) includes localhost; a specific HOST is
+ * the only address that answers.
+ */
+export function reachableHost(host) {
+  if (!host || host === '0.0.0.0' || host === '::') return 'localhost';
+  return host.includes(':') ? `[${host}]` : host;
+}
+
+/** A text setting without surrounding white space; unset or blank is undefined ("not set"). */
+function textSetting(env, name) {
+  return env[name]?.trim() || undefined;
+}
+
+/**
  * A whole number from the environment, written in plain decimal digits ("3000", not "3e3" or
  * "0xBB8"). Unset or blank means the fallback; anything else that cannot be used is an Error with
  * a one-line message.
@@ -38,12 +53,19 @@ export function integerSetting(env, name, { fallback, min, max, unit = '' }) {
  * checkDatabaseSettings in db/sqlite.js.)
  */
 export function loadConfig(env = process.env) {
+  const host = textSetting(env, 'HOST');
+  const dbPath = textSetting(env, 'DB_PATH');
+  const staticDir = textSetting(env, 'STATIC_DIR');
+  const logRequests = textSetting(env, 'LOG_REQUESTS') ?? '1';
+  if (logRequests !== '0' && logRequests !== '1') {
+    throw new Error(`LOG_REQUESTS must be 0 (off) or 1 (on) (got "${env.LOG_REQUESTS}")`);
+  }
   return {
     port: integerSetting(env, 'PORT', { fallback: 3000, min: 0, max: 65535 }),
-    host: env.HOST || undefined, // undefined = all interfaces
-    dbPath: env.DB_PATH ? resolveUserPath(env.DB_PATH, env) : DEFAULT_DB_PATH,
-    staticDir: env.STATIC_DIR ? resolveUserPath(env.STATIC_DIR, env) : DEFAULT_STATIC_DIR,
-    logRequests: env.LOG_REQUESTS !== '0',
+    host, // undefined = all interfaces
+    dbPath: dbPath ? resolveUserPath(dbPath, env) : DEFAULT_DB_PATH,
+    staticDir: staticDir ? resolveUserPath(staticDir, env) : DEFAULT_STATIC_DIR,
+    logRequests: logRequests === '1',
     // CSV exports reading at the same time; further requests wait for a free slot.
     maxConcurrentExports: integerSetting(env, 'EXPORT_MAX_CONCURRENT', { fallback: 4, min: 1, max: 64 }),
     // A download that makes no progress for this long is dropped (0 = never).

@@ -37,6 +37,7 @@ try {
 }
 
 const WAL_SIZE_LIMIT_BYTES = 16 * 1024 * 1024;
+const READER_CACHE_KIB = 1024;
 
 /** Elapsed-time clock for deadlines: it does not jump when the system clock is set, as the wall clock does. */
 const monotonicNow = () => performance.now();
@@ -111,9 +112,14 @@ async function resolveDriver() {
       failures.push(`node:sqlite: ${err.message}`);
     }
   }
+  // The native module is built for one Node.js version: after switching versions "npm install"
+  // sees nothing to do, and only a rebuild helps.
+  const builtForAnotherNode = failures.some((failure) => failure.includes('NODE_MODULE_VERSION'));
   throw new Error(
-    'No SQLite driver could be loaded. Use Node.js >= 22.13 (built-in node:sqlite) or make sure the ' +
-      `optional "better-sqlite3" dependency installed correctly.\n  - ${failures.join('\n  - ')}`,
+    (builtForAnotherNode
+      ? 'No SQLite driver could be loaded: "better-sqlite3" was installed with another Node.js version. Run "npm rebuild better-sqlite3" (or use Node.js >= 22.13, which has node:sqlite built in).'
+      : 'No SQLite driver could be loaded. Use Node.js >= 22.13 (built-in node:sqlite) or make sure the optional "better-sqlite3" dependency installed correctly.') +
+      `\n  - ${failures.join('\n  - ')}`,
   );
 }
 
@@ -156,6 +162,31 @@ export class Connection {
 
   exec(sql) {
     this.#raw.exec(sql);
+  }
+
+  /**
+   * Throws when the database cannot be written to (a file of another user, a read-only volume).
+   * It only asks: nothing is changed, and a writer that is busy right now is not waited for - that
+   * the lock is taken is proof enough that the file can be written.
+   */
+  assertWritable() {
+    const { user_version: version } = this.get('PRAGMA user_version');
+    this.exec('PRAGMA busy_timeout = 0');
+    try {
+      this.exec('BEGIN IMMEDIATE');
+      try {
+        // Taking the write lock is not enough: on a database that can only be read SQLite quietly
+        // turns BEGIN IMMEDIATE into a read transaction. A write statement is what fails there -
+        // this one writes the value that is already stored, and is rolled back all the same.
+        this.exec(`PRAGMA user_version = ${version}`);
+      } finally {
+        this.exec('ROLLBACK');
+      }
+    } catch (err) {
+      if (!isBusyError(err)) throw new Error(`the database cannot be written to (${err.message})`);
+    } finally {
+      this.exec(`PRAGMA busy_timeout = ${LOCK_WAIT_MS}`);
+    }
   }
 
   #statement(sql) {
@@ -333,6 +364,25 @@ export class Connection {
 }
 
 /**
+ * `mkdir -p`, one level at a time. (Node's own recursive mkdir never returns for a path below a
+ * directory that refuses new entries without saying why, such as /proc: it retries for ever.)
+ */
+function createDirectory(dir) {
+  const missing = [];
+  for (let current = dir; !fs.existsSync(current); current = path.dirname(current)) {
+    missing.unshift(current);
+    if (path.dirname(current) === current) break;
+  }
+  for (const level of missing) {
+    try {
+      fs.mkdirSync(level);
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err; // somebody else created it in the meantime
+    }
+  }
+}
+
+/**
  * Opens (and creates, if needed) the database file.
  *
  * WAL journaling is what lets a long CSV export hold a consistent read snapshot while list
@@ -349,7 +399,7 @@ export function openDatabase(file, { queryOnly = false } = {}) {
   if (queryOnly) {
     if (!fs.existsSync(resolved)) throw new Error(`Database file does not exist: ${resolved}`);
   } else {
-    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+    createDirectory(path.dirname(resolved));
   }
 
   const connection = new Connection(driver.open(resolved), resolved);
@@ -357,6 +407,10 @@ export function openDatabase(file, { queryOnly = false } = {}) {
   connection.exec('PRAGMA foreign_keys = ON');
   if (queryOnly) {
     connection.exec('PRAGMA query_only = ON');
+    // An export walks one index from end to end and never comes back to a page, so a large page
+    // cache buys nothing - but it would be filled (16 MB with better-sqlite3's default) and that
+    // memory kept by the process for every export that has ever run at the same time.
+    connection.exec(`PRAGMA cache_size = -${READER_CACHE_KIB}`);
   } else {
     try {
       enableWal(connection);

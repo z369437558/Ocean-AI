@@ -7,6 +7,7 @@ import './support/pin-settings.mjs'; // must stay first: see the file
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import { after, before, describe } from 'node:test';
 
@@ -22,6 +23,7 @@ import {
   BOB,
   SEED,
   assertSameRows,
+  canOpen,
   clientFor,
   countRows,
   createTempDir,
@@ -41,6 +43,7 @@ import {
   startServer,
   stillPending,
   timed,
+  unprivilegedSpawnOptions,
   until,
 } from './helpers.js';
 
@@ -1021,6 +1024,11 @@ describe('A4 - per-learner outcomes', () => {
     assert.equal((await alice.post('/api/bulk-issues', [1])).status, 400);
     assert.equal((await alice.post('/api/bulk-issues', undefined, { rawBody: '{oops' })).status, 400);
     assert.equal((await alice.post('/api/bulk-issues', { courseId: 424242 })).status, 404);
+    // Two spellings of the course in one body: one of them would have to be ignored, so neither is used.
+    const twoNames = await alice.post('/api/bulk-issues', { courseId: SEED.east.firstAid, course_id: SEED.east.forklift });
+    assert.equal(twoNames.status, 400);
+    assert.match(twoNames.json.error.message, /"courseId" and "course_id" mean the same/);
+    assert.equal((await alice.post('/api/bulk-issues', { courseId: SEED.east.firstAid, course_id: SEED.east.firstAid })).status, 400);
     assert.deepEqual(countRows(db), before);
   });
 });
@@ -1515,6 +1523,12 @@ describe('certificate list: search, sort, pagination', () => {
     }
     assert.equal(parseCsv((await alice.get('/api/certificates/export.csv?q=%C2%B4')).text).length, 1, 'header only');
     assert.equal((await alice.get('/api/certificates?q=%C2%B4&status=revoked')).json.total, 0);
+    // Several of them with spaces in between are still nothing to look for (what would be left is a space).
+    for (const typed of ['´ ´', '¨ ´', '˝  ˛', '´ \u0301']) {
+      const res = await alice.get(`/api/certificates?q=${encodeURIComponent(typed)}`);
+      assert.deepEqual([res.status, res.json.total], [200, 0], `q=${typed}`);
+    }
+    assert.equal(parseCsv((await alice.get('/api/certificates/export.csv?q=%C2%B4%20%C2%B4')).text).length, 1, 'header only');
     // Next to a letter it is ignored like any other accent.
     assert.deepEqual(await ids(`q=${encodeURIComponent('Jose´')}`), [JOSE]);
     assert.deepEqual(await ids(`q=${encodeURIComponent('´Alvarez')}`), [JOSE]);
@@ -1595,6 +1609,9 @@ describe('certificate list: search, sort, pagination', () => {
   it('rejects malformed list parameters with a 400', async () => {
     for (const query of [
       'sort=password',
+      // the direction given twice - as a leading minus and as "order" - whether the two agree or not
+      'sort=-learner&order=asc',
+      'sort=-learner&order=desc',
       // near misses of real names are rejected, not guessed at
       'sort=issued!!!',
       'sort=l-e-a-r-n-e-r',
@@ -1908,9 +1925,10 @@ describe('export plumbing: connections, slots and stalled downloads', () => {
   /**
    * Stands in for a reader connection on a table that never ends, so that a download can be made
    * to stall. With `matching` false no row passes the request's filter: the export reads on and on
-   * without ever having anything to send.
+   * without ever having anything to send. With `failAfterRows` reading fails at that row, the way
+   * a disk error in the middle of the table would.
    */
-  function endlessReader({ matching = true } = {}) {
+  function endlessReader({ matching = true, failAfterRows = Infinity } = {}) {
     const row = {
       learner_name: 'x'.repeat(200),
       course_title: 'Endless',
@@ -1921,7 +1939,17 @@ describe('export plumbing: connections, slots and stalled downloads', () => {
     const reader = {
       open: true,
       exec() {},
-      iterate: () => ({ next: () => ({ done: false, value: row }), return: () => ({ done: true, value: undefined }) }),
+      iterate: () => {
+        let rows = 0;
+        return {
+          next: () => {
+            rows += 1;
+            if (rows > failAfterRows) throw new Error('simulated read failure');
+            return { done: false, value: row };
+          },
+          return: () => ({ done: true, value: undefined }),
+        };
+      },
       close() {
         reader.open = false;
       },
@@ -1931,12 +1959,14 @@ describe('export plumbing: connections, slots and stalled downloads', () => {
 
   /** The real app, in this process, with every export connection it opens on record. */
   async function startApp(options = {}) {
-    const state = { readers: [], logged: [], endless: false, failToOpen: false };
+    const state = { readers: [], logged: [], endless: false, failAfterRows: Infinity, failToOpen: false };
     const app = createApp({
       db,
       openReader: () => {
         if (state.failToOpen) throw new Error('simulated failure to open the export connection');
-        const reader = state.endless ? endlessReader({ matching: state.endless !== 'without matches' }) : openDatabase(dbPath, { queryOnly: true });
+        const reader = state.endless
+          ? endlessReader({ matching: state.endless !== 'without matches', failAfterRows: state.failAfterRows })
+          : openDatabase(dbPath, { queryOnly: true });
         state.readers.push(reader);
         return reader;
       },
@@ -2137,6 +2167,100 @@ describe('export plumbing: connections, slots and stalled downloads', () => {
     assert.equal((await clientFor(app.baseUrl, ALICE).get('/api/certificates/export.csv')).status, 200);
   });
 
+  /**
+   * A bare HTTP/1.0 client. Without chunk framing the end of the connection is the end of the
+   * file for it, so how the server ends an unfinished download decides whether the client can
+   * tell. Resolves with `{ status, bytes, how: 'ended' | 'error', code }`.
+   */
+  function plainDownload(app, { closeSendingSide = false, pauseMs = 0 } = {}) {
+    return new Promise((resolve) => {
+      const { hostname, port } = new URL(app.baseUrl);
+      const socket = net.connect({ host: hostname, port: Number(port), allowHalfOpen: true });
+      let head = '';
+      let bytes = 0;
+      const finish = (how, err) => {
+        socket.destroy();
+        resolve({ status: Number(head.split(' ')[1]), bytes, how, code: err?.code });
+      };
+      socket.on('connect', () => socket.write(`GET /api/certificates/export.csv HTTP/1.0\r\nX-Actor-Email: ${ALICE}\r\n\r\n`));
+      socket.on('data', (chunk) => {
+        if (bytes === 0) {
+          head = chunk.toString('latin1', 0, 40);
+          if (closeSendingSide) socket.end(); // "I have nothing more to say" - but it keeps reading
+          if (pauseMs) {
+            socket.pause();
+            setTimeout(() => socket.resume(), pauseMs);
+          }
+        }
+        bytes += chunk.length;
+      });
+      socket.on('end', () => finish('ended'));
+      socket.on('error', (err) => finish('error', err));
+    });
+  }
+
+  it('a download that cannot be completed is cut off with a reset, never ended like a complete file', async () => {
+    const app = await startApp({ exportIdleTimeoutMs: 300 });
+    app.endless = true;
+    // What the server does to a connection is recorded here; what a client makes of a reset
+    // depends on the client (Node itself, before version 24, can report one as a plain end).
+    const resets = [];
+    const resetAndDestroy = net.Socket.prototype.resetAndDestroy;
+    net.Socket.prototype.resetAndDestroy = function recordedReset(...args) {
+      resets.push(this.remotePort);
+      return resetAndDestroy.apply(this, args);
+    };
+    try {
+      // A client that closes its sending side while reading. Node ends the response for it, which
+      // for this client would be the end of a (short) file; the reset says "this is not all".
+      const halfClosed = await plainDownload(app, { closeSendingSide: true });
+      assert.equal(halfClosed.status, 200);
+      assert.ok(halfClosed.bytes > 0);
+      assert.equal(resets.length, 1, 'the half-closed download was reset');
+      if (halfClosed.how === 'error') assert.equal(halfClosed.code, 'ECONNRESET');
+
+      // A client that stops reading is dropped after the idle timeout - with a reset as well, so
+      // that what is still buffered on the way is not delivered and followed by a tidy end.
+      const stalled = await plainDownload(app, { pauseMs: 1_200 });
+      assert.equal(stalled.status, 200);
+      assert.equal(resets.length, 2, 'the stalled download was reset');
+      if (stalled.how === 'error') assert.equal(stalled.code, 'ECONNRESET');
+      assert.ok(app.logged.some((line) => line.includes('download dropped')), app.logged.join('\n'));
+
+      // Reading fails in the middle of the table. What was sent so far is not followed by a tidy
+      // end either, and the cause is in the server log - whichever of "the source failed" and "the
+      // response was cut" the Node.js version at hand reports first.
+      app.failAfterRows = 1_200; // in the third step of 500 rows
+      const broken = await plainDownload(app);
+      app.failAfterRows = Infinity;
+      assert.equal(broken.status, 200);
+      assert.ok(broken.bytes > 0);
+      assert.equal(resets.length, 3, 'the download that broke while reading was reset');
+      if (broken.how === 'error') assert.equal(broken.code, 'ECONNRESET');
+      assert.ok(
+        app.logged.some((line) => line.includes('[export] stream failed') && line.includes('simulated read failure')),
+        app.logged.join('\n'),
+      );
+
+      await until(() => allClosed(app) && app.slots.active === 0, { label: 'the three abandoned exports to be released' });
+      assert.equal(app.readers.length, 3);
+
+      // A download that is completed ends normally, and nothing is reset.
+      app.endless = false;
+      const complete = await plainDownload(app);
+      assert.deepEqual([complete.status, complete.how], [200, 'ended']);
+      assert.ok(complete.bytes > 300);
+      // Neither is a download the client walks away from: the connection is gone already.
+      app.endless = true;
+      const abandoned = await openStream(app.baseUrl, '/api/certificates/export.csv', ALICE);
+      abandoned.abort();
+      await until(() => allClosed(app) && app.slots.active === 0);
+      assert.equal(resets.length, 3);
+    } finally {
+      net.Socket.prototype.resetAndDestroy = resetAndDestroy;
+    }
+  });
+
   it('HEAD announces the download without running it', async () => {
     const app = await startApp({ maxConcurrentExports: 1, exportIdleTimeoutMs: 0 });
     const exportUrl = `${app.baseUrl}/api/certificates/export.csv`;
@@ -2266,6 +2390,82 @@ describe('start-up and maintenance commands', () => {
     assert.equal(corrupt.code, 1);
     assert.match(corrupt.output, /Could not open the database/);
     assert.doesNotMatch(corrupt.output, /^\s+at /m);
+
+    // A path whose directory cannot be created: one line as well, promptly. (Below /proc Node's
+    // own recursive mkdir would never return.)
+    const blocker = path.join(dir, 'blocker-file');
+    fs.writeFileSync(blocker, 'a file where a directory would have to be');
+    const unusable = [path.join(blocker, 'sub', 'x.sqlite')];
+    if (fs.existsSync('/proc/self')) unusable.push('/proc/no-such-entry/x.sqlite');
+    for (const dbPath of unusable) {
+      const { code, output } = await runServerToExit(dbPath);
+      assert.equal(code, 1, dbPath);
+      assert.match(output, /^Could not open the database at /, dbPath);
+      assert.equal(output.trim().split('\n').length, 1, `${dbPath}: one line, got:\n${output}`);
+    }
+  });
+
+  it('a database file that cannot be written to is refused at start-up, not at the first write', async (t) => {
+    // A directory anybody may use, with a database file in it that only its owner could write -
+    // and the owner has taken that right away too. The administrator can write to it all the
+    // same, so a suite that runs as root starts the server as the system's unprivileged user.
+    const shared = createTempDir('cert-admin-read-only-');
+    try {
+      fs.chmodSync(shared, 0o777);
+      const dbPath = path.join(shared, 'read-only.sqlite');
+      await runScript('init-db.js', ['--db', dbPath]);
+      fs.chmodSync(dbPath, 0o444);
+      const spawnOptions = unprivilegedSpawnOptions([dbPath]);
+      if (spawnOptions === null) {
+        t.skip('running as root on a system without an unprivileged user that can run this project');
+        return;
+      }
+      if (canOpen(dbPath, 'r+', spawnOptions)) {
+        t.skip('the file system does not enforce the read-only permission, so the situation cannot be set up here');
+        return;
+      }
+      const { code, output } = await runServerToExit(dbPath, { spawnOptions });
+      assert.equal(code, 1, output);
+      assert.match(output, /^Could not open the database at .*: the database cannot be written to/);
+      assert.equal(output.trim().split('\n').length, 1, output);
+      // Nothing was changed on the way: the same file still opens for whoever may write it.
+      fs.chmodSync(dbPath, 0o644);
+      const db = openDatabase(dbPath);
+      try {
+        assert.deepEqual(totals(db), PRISTINE);
+      } finally {
+        db.close();
+      }
+    } finally {
+      removeTempDir(shared);
+    }
+  });
+
+  it('the start-up line names an address that leads to the server', async () => {
+    const dbPath = path.join(dir, 'start-line.sqlite');
+    // Default: all interfaces, which includes localhost.
+    const everywhere = await startServer(dbPath, { env: { HOST: '' }, expectHost: 'localhost' });
+    try {
+      assert.match(everywhere.output(), /listening on http:\/\/localhost:\d+$/m);
+      assert.equal((await clientFor(everywhere.baseUrl, ALICE).get('/api/me')).status, 200);
+    } finally {
+      await everywhere.stop();
+    }
+    // A specific address: that one, since "localhost" may not lead there.
+    const specific = await startServer(dbPath, { env: { HOST: '127.0.0.1' } });
+    try {
+      assert.match(specific.output(), /listening on http:\/\/127\.0\.0\.1:\d+$/m);
+    } finally {
+      await specific.stop();
+    }
+  });
+
+  it('the root npm scripts hand their arguments on to the backend scripts', () => {
+    const { scripts } = JSON.parse(fs.readFileSync(path.resolve('..', 'package.json'), 'utf8'));
+    // "npm run db:reset -- --db file" only reaches the script when the root script ends in "--".
+    for (const name of ['db:reset', 'generate:east']) {
+      assert.match(scripts[name], new RegExp(`^npm run ${name} --workspace backend --$`), name);
+    }
   });
 
   it('every setting is checked before anything starts, each with its own one-line message', async () => {
@@ -2281,6 +2481,7 @@ describe('start-up and maintenance commands', () => {
       ['PORT', '0b1', /^PORT must be an integer/m],
       ['DB_BUSY_TIMEOUT_MS', '1e3', /^DB_BUSY_TIMEOUT_MS must be an integer/m],
       ['EXPORT_MAX_CONCURRENT', '2.0', /^EXPORT_MAX_CONCURRENT must be an integer/m],
+      ['LOG_REQUESTS', 'false', /^LOG_REQUESTS must be 0 \(off\) or 1 \(on\) \(got "false"\)$/m],
     ]) {
       const { code, output } = await runServerToExit(dbPath, { env: { [name]: value } });
       assert.equal(code, 1, `${name}=${value}`);
@@ -2292,7 +2493,7 @@ describe('start-up and maintenance commands', () => {
 
     // A setting that is present but blank means "not set" - every one of them.
     const blank = await startServer(dbPath, {
-      env: { SQLITE_DRIVER: '', DB_BUSY_TIMEOUT_MS: ' ', EXPORT_MAX_CONCURRENT: '', EXPORT_IDLE_TIMEOUT_MS: '', LOG_REQUESTS: '' },
+      env: { SQLITE_DRIVER: '', DB_BUSY_TIMEOUT_MS: ' ', EXPORT_MAX_CONCURRENT: '', EXPORT_IDLE_TIMEOUT_MS: '', LOG_REQUESTS: ' ', STATIC_DIR: '  ' },
     });
     try {
       assert.equal((await clientFor(blank.baseUrl, ALICE).get('/api/certificates')).json.total, SEED.east.certificateCount);

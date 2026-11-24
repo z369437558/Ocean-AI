@@ -710,7 +710,7 @@
       },
       "operations": [],
       "exportCsv": {
-        "contentDisposition": "attachment; filename=\"certificates-east-20261124-0628.csv\"",
+        "contentDisposition": "attachment; filename=\"certificates-east-20261124-1452.csv\"",
         "body": "Learner Name,Course Title,Serial Number,Issue Date (Australia/Sydney)\nTom Walker,Forklift Operations,EAST-0000007,2026-10-04 03:30\nMarcus O'Connor,Forklift Operations,EAST-0000006,2026-10-04 01:30\nPriya Sharma,Forklift Operations,EAST-0000005,2026-06-15 12:00\nJosé Álvarez,First Aid Refresher,EAST-0000004,2026-04-05 02:30\nSofia Rossi,First Aid Refresher,EAST-0000003,2026-04-05 02:30\nMei Chen,First Aid Refresher,EAST-0000002,2026-02-15 09:15\nAlex Lee,Safety 101,EAST-0000001,2026-01-11 00:30\n"
       }
     },
@@ -1198,7 +1198,7 @@
       },
       "operations": [],
       "exportCsv": {
-        "contentDisposition": "attachment; filename=\"certificates-west-20261124-0328.csv\"",
+        "contentDisposition": "attachment; filename=\"certificates-west-20261124-1152.csv\"",
         "body": "Learner Name,Course Title,Serial Number,Issue Date (Australia/Perth)\nEmily Davis,Manual Handling,WEST-0000004,2026-09-12 18:20\nGrace Kim,Working at Heights,WEST-0000003,2026-08-01 11:00\nLiam Brown,Working at Heights,WEST-0000002,2026-03-21 01:45\nAlex Lee,Safety 101,WEST-0000001,2026-01-10 21:30\n"
       }
     }
@@ -1264,8 +1264,8 @@
             "name": "East",
             "timezone": "Australia/Sydney"
           },
-          "createdAt": "2026-11-23T19:28:00.837Z",
-          "completedAt": "2026-11-23T19:28:00.838Z",
+          "createdAt": "2026-11-24T03:52:52.196Z",
+          "completedAt": "2026-11-24T03:52:52.197Z",
           "summary": {
             "total": 5,
             "issued": 2,
@@ -1290,8 +1290,8 @@
               "outcome": "issued",
               "certificateId": 12,
               "serialNumber": "EAST-0000008",
-              "issuedAt": "2026-11-23T19:28:00.837Z",
-              "issuedLocal": "2026-11-24 06:28"
+              "issuedAt": "2026-11-24T03:52:52.196Z",
+              "issuedLocal": "2026-11-24 14:52"
             },
             {
               "learnerId": 4,
@@ -1308,8 +1308,8 @@
               "outcome": "issued",
               "certificateId": 13,
               "serialNumber": "EAST-0000009",
-              "issuedAt": "2026-11-23T19:28:00.837Z",
-              "issuedLocal": "2026-11-24 06:28"
+              "issuedAt": "2026-11-24T03:52:52.196Z",
+              "issuedLocal": "2026-11-24 14:52"
             },
             {
               "learnerId": 5,
@@ -1334,8 +1334,8 @@
             "name": "East",
             "timezone": "Australia/Sydney"
           },
-          "createdAt": "2026-11-23T19:28:00.842Z",
-          "completedAt": "2026-11-23T19:28:00.842Z",
+          "createdAt": "2026-11-24T03:52:52.207Z",
+          "completedAt": "2026-11-24T03:52:52.210Z",
           "summary": {
             "total": 5,
             "issued": 0,
@@ -1492,8 +1492,8 @@
           },
           "idempotencyKey": "fixture-key-2",
           "requestedBy": "alice@east.test",
-          "createdAt": "2026-11-23T19:28:00.842Z",
-          "createdLocal": "2026-11-24 06:28",
+          "createdAt": "2026-11-24T03:52:52.207Z",
+          "createdLocal": "2026-11-24 14:52",
           "summary": {
             "total": 5,
             "issued": 0,
@@ -1510,8 +1510,8 @@
           },
           "idempotencyKey": "fixture-key-1",
           "requestedBy": "alice@east.test",
-          "createdAt": "2026-11-23T19:28:00.837Z",
-          "createdLocal": "2026-11-24 06:28",
+          "createdAt": "2026-11-24T03:52:52.196Z",
+          "createdLocal": "2026-11-24 14:52",
           "summary": {
             "total": 5,
             "issued": 2,
@@ -1613,8 +1613,8 @@
           "courseId": 1,
           "courseTitle": "Safety 101",
           "status": "active",
-          "issuedAt": "2026-11-23T19:28:00.837Z",
-          "issuedLocal": "2026-11-24 06:28",
+          "issuedAt": "2026-11-24T03:52:52.196Z",
+          "issuedLocal": "2026-11-24 14:52",
           "issuedLocalDate": "2026-11-24"
         },
         {
@@ -1625,8 +1625,8 @@
           "courseId": 1,
           "courseTitle": "Safety 101",
           "status": "active",
-          "issuedAt": "2026-11-23T19:28:00.837Z",
-          "issuedLocal": "2026-11-24 06:28",
+          "issuedAt": "2026-11-24T03:52:52.196Z",
+          "issuedLocal": "2026-11-24 14:52",
           "issuedLocalDate": "2026-11-24"
         }
       ]
@@ -1647,8 +1647,8 @@
             "name": "West",
             "timezone": "Australia/Perth"
           },
-          "createdAt": "2026-11-23T19:28:00.843Z",
-          "completedAt": "2026-11-23T19:28:00.844Z",
+          "createdAt": "2026-11-24T03:52:52.215Z",
+          "completedAt": "2026-11-24T03:52:52.220Z",
           "summary": {
             "total": 5,
             "issued": 1,
@@ -1689,8 +1689,8 @@
               "outcome": "issued",
               "certificateId": 14,
               "serialNumber": "WEST-0000005",
-              "issuedAt": "2026-11-23T19:28:00.843Z",
-              "issuedLocal": "2026-11-24 03:28"
+              "issuedAt": "2026-11-24T03:52:52.215Z",
+              "issuedLocal": "2026-11-24 11:52"
             },
             {
               "learnerId": 11,
@@ -1803,8 +1803,8 @@
           },
           "idempotencyKey": "fixture-key-3",
           "requestedBy": "bob@west.test",
-          "createdAt": "2026-11-23T19:28:00.843Z",
-          "createdLocal": "2026-11-24 03:28",
+          "createdAt": "2026-11-24T03:52:52.215Z",
+          "createdLocal": "2026-11-24 11:52",
           "summary": {
             "total": 5,
             "issued": 1,
@@ -1870,8 +1870,8 @@
           "courseId": 4,
           "courseTitle": "Safety 101",
           "status": "active",
-          "issuedAt": "2026-11-23T19:28:00.843Z",
-          "issuedLocal": "2026-11-24 03:28",
+          "issuedAt": "2026-11-24T03:52:52.215Z",
+          "issuedLocal": "2026-11-24 11:52",
           "issuedLocalDate": "2026-11-24"
         }
       ]
@@ -1894,8 +1894,8 @@
       "issuedUtcOffset": "+10:00",
       "issuedBy": "alice@east.test",
       "bulkOperationId": null,
-      "revokedAt": "2026-11-23T19:28:00.851Z",
-      "revokedLocal": "2026-11-24 06:28",
+      "revokedAt": "2026-11-24T03:52:52.234Z",
+      "revokedLocal": "2026-11-24 14:52",
       "revokedBy": "alice@east.test",
       "revocationReason": "Issued in error",
       "tenant": {
@@ -1926,8 +1926,8 @@
           "actorEmail": "alice@east.test",
           "certificateId": 4,
           "bulkOperationId": null,
-          "createdAt": "2026-11-23T19:28:00.851Z",
-          "createdLocal": "2026-11-24 06:28",
+          "createdAt": "2026-11-24T03:52:52.234Z",
+          "createdLocal": "2026-11-24 14:52",
           "details": {
             "serialNumber": "EAST-0000004",
             "reason": "Issued in error",
@@ -1951,8 +1951,8 @@
       "issuedUtcOffset": "+10:00",
       "issuedBy": "alice@east.test",
       "bulkOperationId": null,
-      "revokedAt": "2026-11-23T19:28:00.851Z",
-      "revokedLocal": "2026-11-24 06:28",
+      "revokedAt": "2026-11-24T03:52:52.234Z",
+      "revokedLocal": "2026-11-24 14:52",
       "revokedBy": "alice@east.test",
       "revocationReason": "Issued in error",
       "tenant": {
@@ -1983,8 +1983,8 @@
           "actorEmail": "alice@east.test",
           "certificateId": 4,
           "bulkOperationId": null,
-          "createdAt": "2026-11-23T19:28:00.851Z",
-          "createdLocal": "2026-11-24 06:28",
+          "createdAt": "2026-11-24T03:52:52.234Z",
+          "createdLocal": "2026-11-24 14:52",
           "details": {
             "serialNumber": "EAST-0000004",
             "reason": "Issued in error",
@@ -2090,8 +2090,8 @@
         "courseId": 1,
         "courseTitle": "Safety 101",
         "status": "active",
-        "issuedAt": "2026-11-23T19:28:00.837Z",
-        "issuedLocal": "2026-11-24 06:28",
+        "issuedAt": "2026-11-24T03:52:52.196Z",
+        "issuedLocal": "2026-11-24 14:52",
         "issuedLocalDate": "2026-11-24"
       },
       {
@@ -2102,8 +2102,8 @@
         "courseId": 1,
         "courseTitle": "Safety 101",
         "status": "active",
-        "issuedAt": "2026-11-23T19:28:00.837Z",
-        "issuedLocal": "2026-11-24 06:28",
+        "issuedAt": "2026-11-24T03:52:52.196Z",
+        "issuedLocal": "2026-11-24 14:52",
         "issuedLocalDate": "2026-11-24"
       },
       {

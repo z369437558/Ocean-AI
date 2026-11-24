@@ -70,6 +70,11 @@ function resetInPlace() {
     db.transaction(() => {
       for (const table of TABLES_IN_DELETE_ORDER) db.exec(`DELETE FROM ${table}`);
       seedDemoData(db);
+      // The load-test generator leaves planner statistics behind (PRAGMA optimize). They describe
+      // rows that are gone now; a pristine database has none.
+      for (const { name } of db.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'sqlite_stat%'")) {
+        db.exec(`DROP TABLE ${name}`);
+      }
     });
     try {
       // Hand the space of removed load-test rows back to the file system: rebuild the file, then

@@ -30,8 +30,7 @@ function OperationResult({ operation, replayed, onDismiss, headingId = 'result-h
     <section className="panel" aria-labelledby={headingId} data-testid="operation-result">
       <div className="panel-header">
         <div>
-          {/* Focusable by script only: see viewOperation in BulkIssuePage. */}
-          <h2 id={headingId} tabIndex={-1}>
+          <h2 id={headingId}>
             Operation #{operation.id} · {operation.course.title}
           </h2>
           <p className="muted">
@@ -162,8 +161,14 @@ export default function BulkIssuePage({ api, actor, bulkIssues }) {
   // Coming back to a run that is pending or still on display: start on the course it is about.
   const [courseId, setCourseId] = useState(() => (run.status === 'idle' ? '' : String(run.attempt.courseId)));
   const [rosterPage, setRosterPage] = useState(1);
+  // Every roster is kept together with the value of `settled` it was asked for (not the value at
+  // the time its answer arrives): that is how the page tells a roster that reflects the last bulk
+  // issue from one that was requested before it finished.
   const roster = useQuery(
-    (signal) => (courseId ? api.getRoster(courseId, rosterPage, signal) : Promise.resolve(null)),
+    (signal) =>
+      courseId
+        ? api.getRoster(courseId, rosterPage, signal).then((data) => ({ data, loadedFor: settled }))
+        : Promise.resolve(null),
     [api, courseId, rosterPage, settled],
   );
 
@@ -176,12 +181,21 @@ export default function BulkIssuePage({ api, actor, bulkIssues }) {
   );
 
   const selectedCourse = courses.data?.find((course) => String(course.id) === courseId) ?? null;
-  const rosterData = roster.status !== 'error' && roster.data?.course.id === selectedCourse?.id ? roster.data : null;
+  const rosterLoaded = roster.status !== 'error' && roster.data?.data.course.id === selectedCourse?.id ? roster.data : null;
+  const rosterData = rosterLoaded?.data ?? null;
+  // The answer to a bulk issue and the roster it has changed do not arrive together: the store
+  // reports the result (and moves `settled`) in one render, the roster starts to reload after it.
+  // Until that reload is back the numbers on screen describe the time before the run, and a click
+  // on "Issue 2 certificates" would send them again as a second operation under a new key.
+  const rosterOutdated = rosterLoaded !== null && rosterLoaded.loadedFor !== settled;
+  const rosterRefreshing = roster.status === 'loading' || rosterOutdated;
   const eligible = rosterData?.summary.eligible ?? 0;
   const submitting = run.status === 'submitting';
   // Why the run failed decides what may be said about it; only a 4xx is a definite "rejected".
   const failure = run.status === 'failed' ? writeOutcome(run.error) : null;
   const awaitingRetryDecision = failure === 'not_run' || failure === 'unknown';
+  // Turning the pages of a roster changes nothing about who is eligible, so that does not lock.
+  const canIssue = rosterData !== null && !rosterOutdated && eligible > 0 && !submitting && !awaitingRetryDecision;
 
   const runResultId = run.status === 'succeeded' ? run.operation.id : null;
   // The result of the run is on screen already: never a second panel for the same operation.
@@ -194,6 +208,8 @@ export default function BulkIssuePage({ api, actor, bulkIssues }) {
     bulkIssues.submit(api, attempt);
   }
 
+  // Only reachable through the Issue button, i.e. while `canIssue` holds: a new key is a new
+  // operation, so it is only made for a roster the admin can see is current.
   function startIssue() {
     if (!selectedCourse) return;
     submit({ courseId: selectedCourse.id, courseTitle: selectedCourse.title, key: newIdempotencyKey() });
@@ -203,15 +219,31 @@ export default function BulkIssuePage({ api, actor, bulkIssues }) {
     // Choosing the course that is already selected is not a new choice and must not discard the
     // status on screen. (A browser sends no change event for it; a script driving the page can.)
     if (nextId === courseId) return;
+    // An attempt that is on its way, or whose outcome is open, keeps its course: moving on would
+    // drop the prompt to retry it and the key that makes the retry safe. The picker is locked in
+    // both cases; this is for whatever changes it all the same.
+    if (submitting || awaitingRetryDecision) return;
     setCourseId(nextId);
     setRosterPage(1);
     setViewedId(null);
-    bulkIssues.dismiss(actor.email); // a request in flight stays; the select is locked then anyway
+    bulkIssues.dismiss(actor.email); // a result or a rejection on display belongs to the old choice
   }
 
   function dismissRun() {
     if (viewedId === runResultId) setViewedId(null); // or the hidden copy would pop up in its place
     bulkIssues.dismiss(actor.email);
+  }
+
+  /** Takes the admin to the result of the run: scrolls to its heading and puts the focus on it. */
+  function showRunResult() {
+    const heading = document.getElementById('result-heading');
+    if (!heading) return;
+    heading.scrollIntoView?.({ block: 'nearest' });
+    // Focusable for this one occasion only: a heading that could always take the focus would
+    // also be outlined by an ordinary click on its text.
+    heading.setAttribute('tabindex', '-1');
+    heading.addEventListener('blur', () => heading.removeAttribute('tabindex'), { once: true });
+    heading.focus();
   }
 
   function viewOperation(id) {
@@ -220,9 +252,7 @@ export default function BulkIssuePage({ api, actor, bulkIssues }) {
       // Moving the focus is what makes the click perceivable when the panel is in view already:
       // a screen reader announces the heading, and styles.css outlines it.
       setViewedId(null);
-      const heading = document.getElementById('result-heading');
-      heading?.scrollIntoView?.({ block: 'nearest' });
-      heading?.focus();
+      showRunResult();
     } else if (id === viewedId) {
       viewed.reload();
     } else {
@@ -251,7 +281,8 @@ export default function BulkIssuePage({ api, actor, bulkIssues }) {
               <span className="field-label">Course</span>
               <select
                 value={courseId}
-                disabled={courses.status === 'loading' || submitting}
+                disabled={courses.status === 'loading' || submitting || awaitingRetryDecision}
+                aria-describedby={awaitingRetryDecision ? 'course-locked-hint' : undefined}
                 onChange={(event) => changeCourse(event.target.value)}
                 data-testid="course-select"
               >
@@ -269,17 +300,17 @@ export default function BulkIssuePage({ api, actor, bulkIssues }) {
                 type="button"
                 className="btn btn-primary"
                 onClick={startIssue}
-                disabled={!rosterData || eligible === 0 || submitting || awaitingRetryDecision || roster.status === 'loading'}
+                disabled={!canIssue}
                 data-testid="issue-button"
               >
                 {submitting ? (
                   <Spinner label="Issuing…" />
-                ) : rosterData && eligible === 0 ? (
+                ) : !rosterData || rosterOutdated ? (
+                  'Issue certificates' // no number that the roster on its way may contradict
+                ) : eligible === 0 ? (
                   'No eligible learners'
-                ) : rosterData ? (
-                  `Issue ${eligible.toLocaleString('en-US')} certificate${eligible === 1 ? '' : 's'}`
                 ) : (
-                  'Issue certificates'
+                  `Issue ${eligible.toLocaleString('en-US')} certificate${eligible === 1 ? '' : 's'}`
                 )}
               </button>
             </div>
@@ -292,6 +323,18 @@ export default function BulkIssuePage({ api, actor, bulkIssues }) {
             <p className="note">
               <Spinner label={`Issuing certificates for ${run.attempt.courseTitle}…`} /> Please wait; the button is locked
               until the server has answered.
+            </p>
+          ) : null}
+          {run.status === 'succeeded' ? (
+            // Said here, in the live region, so that the end of the run is announced as its start
+            // was - and seen next to the button when the result panel is below a long roster.
+            <p className={run.operation.summary.failed > 0 ? 'note' : 'note note-success'} data-testid="operation-announcement">
+              Operation #{run.operation.id} for {run.operation.course.title} completed: {run.operation.summary.issued} issued,{' '}
+              {run.operation.summary.skipped} skipped, {run.operation.summary.failed} failed.
+              {run.replayed ? ' It repeats an earlier request, so nothing was issued twice.' : ''}{' '}
+              <button type="button" className="link" onClick={showRunResult}>
+                Show outcomes
+              </button>
             </p>
           ) : null}
           {run.status === 'failed' ? (
@@ -309,9 +352,9 @@ export default function BulkIssuePage({ api, actor, bulkIssues }) {
                 </strong>
                 <p>{run.error?.message || 'Unexpected error'}</p>
                 {awaitingRetryDecision ? (
-                  <p className="muted small">
+                  <p className="muted small" id="course-locked-hint">
                     Retrying is safe: the request is repeated with the same idempotency key, so learners are never
-                    certified twice.
+                    certified twice. The course stays selected until this attempt has been retried or dismissed.
                   </p>
                 ) : null}
               </div>
@@ -370,8 +413,8 @@ export default function BulkIssuePage({ api, actor, bulkIssues }) {
             {rosterData.items.length === 0 ? (
               <EmptyState title="Nobody is enrolled in this course" />
             ) : (
-              <div className="table-wrap" aria-busy={roster.status === 'loading'}>
-                <table className={roster.status === 'loading' ? 'data-table is-refreshing' : 'data-table'}>
+              <div className="table-wrap" aria-busy={rosterRefreshing}>
+                <table className={rosterRefreshing ? 'data-table is-refreshing' : 'data-table'}>
                   <thead>
                     <tr>
                       <th scope="col">Learner</th>
@@ -420,7 +463,7 @@ export default function BulkIssuePage({ api, actor, bulkIssues }) {
                 total={rosterData.total}
                 pageSize={rosterData.pageSize}
                 itemCount={rosterData.items.length}
-                disabled={roster.status === 'loading'}
+                disabled={rosterRefreshing}
                 onPageChange={setRosterPage}
                 noun="learners"
               />

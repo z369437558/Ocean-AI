@@ -202,6 +202,11 @@ export function createApi(actor) {
      */
     async exportCsv(params, signal) {
       const response = await send(`/certificates/export.csv${toQueryString(params)}`, { actor, signal });
+      // Checked like every other answer before it is used: a 200 that is not the export (the page
+      // of a gateway in front of the console, say) must not be saved as a .csv and reported as done.
+      if (!/^text\/csv\b/i.test(response.headers.get('Content-Type') ?? '')) {
+        throw new ApiError(0, 'invalid_response', 'The server sent an answer that is not a CSV export.');
+      }
       const blob = await readBody(response, (res) => res.blob());
       // Whoever asked for this file may be gone by now (the page was left, the actor was switched).
       // The download itself can no longer be cancelled at this point, but saving it still can.

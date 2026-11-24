@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { createApp } from './app.js';
 import { openInitializedDatabase } from './bootstrap.js';
-import { loadConfig } from './config.js';
+import { loadConfig, reachableHost } from './config.js';
 import { checkDatabaseSettings, openDatabase } from './db/sqlite.js';
 import { ACTOR_HEADER, listActors } from './services/actors.js';
 
@@ -61,7 +61,7 @@ server.listen(config.port, config.host, () => {
   const { port } = server.address();
   const hasFrontend = fs.existsSync(path.join(config.staticDir, 'index.html'));
   console.log(`Database: ${config.dbPath} (${db.driver})`);
-  console.log(`Certificate Admin Console listening on http://localhost:${port}`);
+  console.log(`Certificate Admin Console listening on http://${reachableHost(config.host)}:${port}`);
   const actors = listActors(db).map((actor) => `${actor.email} (${actor.tenant.name})`);
   console.log(`Actors (${ACTOR_HEADER} header): ${actors.join(', ')}`);
   if (!hasFrontend) console.log('Note: frontend build not found - serving the API only.');

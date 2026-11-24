@@ -52,7 +52,14 @@ export function parseHash(hash) {
   return { view: 'certificates', certificateId };
 }
 
-/** Minimal hash router: #/certificates, #/certificates/:id, #/bulk-issue. */
+/**
+ * Minimal hash router: #/certificates, #/certificates/:id, #/bulk-issue. Returns `[route, go]`.
+ *
+ * `go(path)` changes the route in the same render as any other state the caller sets with it. A
+ * plain `location.hash = ...` only takes effect a moment later, with the hashchange event - one
+ * render too late when the old route must not be shown together with the new state (a certificate
+ * of the previous tenant under the newly selected actor).
+ */
 export function useHashRoute() {
   const [route, setRoute] = useState(() => parseHash(window.location.hash));
   useEffect(() => {
@@ -60,7 +67,11 @@ export function useHashRoute() {
     window.addEventListener('hashchange', onChange);
     return () => window.removeEventListener('hashchange', onChange);
   }, []);
-  return route;
+  const go = useCallback((path) => {
+    setRoute(parseHash(`#${path}`));
+    window.location.hash = path;
+  }, []);
+  return [route, go];
 }
 
 export function navigate(path) {

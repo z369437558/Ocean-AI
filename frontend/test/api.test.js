@@ -264,7 +264,7 @@ describe('api.js: exportCsv', () => {
     vi.stubGlobal('fetch', async () => ({
       ok: true,
       status: 200,
-      headers: new Headers({ 'Content-Disposition': recorded.tenants[ALICE].exportCsv.contentDisposition }),
+      headers: new Headers({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': recorded.tenants[ALICE].exportCsv.contentDisposition }),
       blob: () => body.promise,
     }));
     const pending = failure(createApi(ALICE).exportCsv(params, controller.signal));
@@ -278,9 +278,27 @@ describe('api.js: exportCsv', () => {
   it('item B: reports a download that breaks off as ApiError(0, network_error)', async () => {
     const saved = captureDownloads();
     const server = startFakeServer();
-    server.once('GET', '/api/certificates/export.csv', () => unreadableBody(200));
+    server.once('GET', '/api/certificates/export.csv', () => unreadableBody(200, { 'Content-Type': 'text/csv; charset=utf-8' }));
     const error = await failure(createApi(ALICE).exportCsv(params));
     expect(error).toMatchObject({ status: 0, code: 'network_error' });
+    expect(saved).toEqual([]);
+  });
+
+  it.each([
+    ['an HTML page', { 'Content-Type': 'text/html; charset=utf-8' }, '<!doctype html><title>Sign in</title>'],
+    ['JSON', { 'Content-Type': 'application/json' }, '{"items":[]}'],
+    ['a body without a content type', {}, 'Learner Name,Course Title'],
+  ])('item D: refuses a 200 answer that is not a CSV export (%s) and saves nothing', async (_what, headers, body) => {
+    const saved = captureDownloads();
+    const server = startFakeServer();
+    server.once('GET', '/api/certificates/export.csv', () => {
+      const response = new Response(body, { status: 200 });
+      response.headers.delete('Content-Type'); // a Response made from text announces text/plain by itself
+      for (const [name, value] of Object.entries(headers)) response.headers.set(name, value);
+      return response;
+    });
+    const error = await failure(createApi(ALICE).exportCsv(params));
+    expect(error).toMatchObject({ status: 0, code: 'invalid_response' });
     expect(saved).toEqual([]);
   });
 });

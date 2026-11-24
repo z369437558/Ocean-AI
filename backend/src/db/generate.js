@@ -11,7 +11,7 @@
  * The data is deliberately full of equal sort keys, because that is what makes ordering bugs
  * visible: about 2,500 distinct learner names shared by 10,000 learners, 10 course titles, and
  * issue timestamps that come in batches (many certificates carry the very same instant, the way a
- * real bulk issue stamps them), a few hundred per calendar day.
+ * real bulk issue stamps them), about 150 per calendar day.
  *
  * Everything is derived from a seeded PRNG, so the same arguments always produce the same rows.
  */

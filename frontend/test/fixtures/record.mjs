@@ -36,6 +36,7 @@ function startServer() {
     env: {
       ...process.env,
       PORT: '0',
+      HOST: '127.0.0.1',
       DB_PATH: dbFile,
       DB_BUSY_TIMEOUT_MS: '300', // a held write lock turns into a 503 quickly
       LOG_REQUESTS: '0',
@@ -49,7 +50,7 @@ function startServer() {
   for (const stream of [child.stdout, child.stderr]) stream.on('data', (chunk) => (log.text += chunk));
   return new Promise((resolve, reject) => {
     child.stdout.on('data', () => {
-      const match = /listening on (http:\/\/localhost:\d+)/.exec(log.text);
+      const match = /listening on (http:\/\/127\.0\.0\.1:\d+)/.exec(log.text);
       if (match) resolve({ child, log, baseUrl: match[1] });
     });
     child.on('exit', (code) => reject(new Error(`The backend exited with code ${code} before it was ready:\n${log.text}`)));

@@ -29,9 +29,12 @@ with the demo data (first run only) and starts the whole app on **http://localho
 npm test
 ```
 
-Runs the verification suite: 179 API tests covering acceptance criteria A1–A7, including the
-100,000-row export checks, followed by 231 UI tests of the four workflows. It uses throw-away
-databases in the OS temp directory and never touches the app's data. Takes about a minute.
+Runs the verification suite: 190 API tests covering acceptance criteria A1–A7, including the
+100,000-row export checks, followed by 252 UI tests of the four workflows. It uses throw-away
+databases in the OS temp directory and never touches the app's data. Takes about a minute. (One
+API test needs a file the server may read but not write. Root may write every file, so when the
+suite runs as root - in a container, say - that test starts its server as the system's
+unprivileged user `nobody`, and is reported as skipped only where that is not possible.)
 
 Other commands:
 
@@ -41,22 +44,25 @@ Other commands:
 | `npm run generate:east -- --clear`    | Removes the generated certificates again                                     |
 | `npm run db:reset`                    | Restores the pristine quick-start dataset (safe while the server is running) |
 | `PORT=4000 npm start`                 | Use another port (more settings below)                                       |
-| `npm run dev`                         | Development mode: API with auto-restart + Vite dev server on :5173           |
+| `npm run dev`                         | Development mode: API with auto-restart + Vite dev server on :5173 (after one `npm start` or `npm install`) |
 
 Data lives in `data/cert-admin.sqlite` and survives restarts.
 
-Settings, all optional, are environment variables; one that is set but blank counts as not set,
-and numbers are written in plain decimal digits. A value that cannot be used is reported in one
-line and nothing starts: the settings are checked first, then the port is claimed, and only then
-is the database opened (or created) - a start that fails on a setting or on the port does not
-leave a database file behind.
+Settings, all optional, are environment variables; one that is set but blank (empty, or nothing
+but white space) counts as not set, and numbers are written in plain decimal digits. A value that
+cannot be used is reported in one line and nothing starts: the settings are checked first, then
+the port is claimed, and only then is the database opened (or created) - a start that fails on a
+setting or on the port does not leave a database file behind. A database that cannot be written
+to (a read-only file or directory) is refused at that point as well, not at the first write. The
+line printed after a successful start names the address to open: `localhost` when the server
+listens on all interfaces, the configured `HOST` otherwise.
 
 | Variable                 | Default                  | Meaning |
 | ------------------------ | ------------------------ | ------- |
 | `PORT`                   | `3000`                   | HTTP port |
 | `HOST`                   | all interfaces           | Address to listen on (`127.0.0.1` = this machine only) |
 | `DB_PATH`                | `data/cert-admin.sqlite` | Database file |
-| `LOG_REQUESTS`           | on                       | `0` turns the request log off |
+| `LOG_REQUESTS`           | `1` (on)                 | `0` turns the request log off |
 | `DB_BUSY_TIMEOUT_MS`     | `10000`                  | How long a write waits for another process's write lock before answering 503 |
 | `EXPORT_MAX_CONCURRENT`  | `4`                      | CSV exports that read at the same time; further ones wait their turn |
 | `EXPORT_IDLE_TIMEOUT_MS` | `300000`                 | A download that makes no progress for this long is dropped (`0` = never) |
@@ -101,7 +107,8 @@ certificates issued minutes before and after both 2026 daylight-saving transitio
 ## 3. Using the console
 
 - **Certificates** – search by learner name or serial number, filter by status, sort by any column
-  (header click or the *Sort by* menu), page through results. The search looks for the text
+  (header click or the *Sort by* menu), page through results (5 to 100 rows per page; 5 is there
+  so that paging can be tried on the seven demo certificates). The search looks for the text
   anywhere in the name or serial number and ignores case and accents (`alvarez` finds
   *José Álvarez*, `lukasz` finds *Łukasz*). Loading, empty and error states are shown in place;
   errors offer *Try again*. Click a row for the detail drawer.
@@ -111,19 +118,26 @@ certificates issued minutes before and after both 2026 daylight-saving transitio
   outcomes: revoked, *not revoked* (the server refused or was busy; *Try again* is offered), or -
   when the answer was lost on the way - *may or may not have been revoked*. In that last case the
   console asks the server for the current state right away and says so once the certificate turns
-  out to be revoked.
+  out to be revoked. Drawer and confirmation are modal: Tab stays inside the one on top, and
+  nothing behind it can be operated - a confirmation whose request is on its way can neither be
+  closed nor bypassed.
 - **Export CSV** – downloads exactly the rows of the current search, status filter and sort order.
-  Leaving the page or switching the actor cancels an export that is still running.
+  Leaving the page or switching the actor cancels an export that is still running. An answer that
+  is not a CSV file (say, the sign-in page of a gateway in front of the console) is reported as a
+  failed export, not saved.
 - **Bulk issue** – choose a course to see its roster and what the next bulk issue will do for each
-  learner, then issue. The button locks while the request is in flight, the operation status is
-  shown, and the result lists every learner as issued / skipped (with reason) / failed. The lock
-  and the status belong to the attempt, not to the page: they are still there after a visit to the
-  other tab or another actor. If the answer is lost (network error, 5xx, unreadable answer), the
-  status says that the bulk issue *may or may not have gone through* and *Retry safely* repeats
-  the request with the same idempotency key. An attempt whose outcome is not known yet also
-  survives a reload of the page (it is kept in the browser tab's session storage until then) and
-  comes back as that same *Retry safely* prompt, so a reload cannot silently turn one click into
-  two different requests. *Recent operations* shows past runs.
+  learner, then issue. The button locks while the request is in flight - and stays locked until
+  the roster on screen reflects the finished run - the operation status is shown (and announced
+  to screen readers, start and end), and the result lists every learner as issued / skipped (with
+  reason) / failed. The lock and the status belong to the attempt, not to the page: they are still
+  there after a visit to the other tab or another actor. If the answer is lost (network error,
+  5xx, unreadable answer), the status says that the bulk issue *may or may not have gone through*
+  and *Retry safely* repeats the request with the same idempotency key; until the admin has
+  retried or dismissed it, the course picker stays locked, so the prompt and its key cannot get
+  lost on the way to another course. An attempt whose outcome is not known yet also survives a
+  reload of the page (it is kept in the browser tab's session storage until then) and comes back
+  as that same *Retry safely* prompt, so a reload cannot silently turn one click into two
+  different requests. *Recent operations* shows past runs.
 
 Should a page ever fail to render, an error panel with *Reload the console* (and a way back to the
 certificate list) is shown instead of a blank screen.
@@ -140,6 +154,7 @@ npm run generate:east -- --count 250000    # other volumes
 npm run generate:east -- --clear           # remove the generated rows
 npm run generate:east -- --db /tmp/load.sqlite   # work on a separate database file instead
                                                  # (start the app on it with DB_PATH=/tmp/load.sqlite npm start)
+npm run db:reset -- --db /tmp/load.sqlite        # and back to the quick-start dataset in that file
 ```
 
 The generator **does not modify the quick-start dataset**. The generated certificates belong to
@@ -151,7 +166,7 @@ every demo scenario behave as before, and the next certificate issued through th
 `EAST-0000008` with or without the load-test data. Re-running the generator replaces the previous
 generated set, so the count never piles up; `--clear` removes it and leaves exactly the rows that
 were there without it; `npm run db:reset` restores the pristine dataset and shrinks the database
-file back to its original size.
+file back to the size of a newly created one.
 
 The generator writes everything in one transaction. While it runs, a server on the same database
 keeps answering reads (which see the old rows until the generator commits) and retries of finished
@@ -167,17 +182,21 @@ PRNG, so every run produces the same rows, serial numbers included (`--seed N` g
 All endpoints except `/api/health` and `/api/actors` require `X-Actor-Email`. Errors have the shape
 `{"error": {"code": "...", "message": "..."}}`: `400` invalid input, `401` missing or unknown actor,
 `404` unknown id (including ids of another tenant), `409` idempotency key reused for a different
-request, `413` body larger than 100 kB, and `503` with `Retry-After` in two situations where
-nothing was done and the request can simply be repeated: `database_busy` (another process has held
-the database's write lock for longer than `DB_BUSY_TIMEOUT_MS`) and `export_busy` (32 exports
-are already waiting for a free export slot).
+request, `413` body larger than 100 kB, `415` body in an encoding or character set the server does
+not read, and `503` with `Retry-After` in two situations where nothing was done and the request
+can simply be repeated: `database_busy` (another process has held the database's write lock for
+longer than `DB_BUSY_TIMEOUT_MS`) and `export_busy` (32 exports are already waiting for a free
+export slot). Anything unexpected is a `500 internal_error`; its cause goes to the server log, not
+into the answer.
 
 Query parameters are validated: an unknown value is a `400`, never silently ignored; a parameter
 that is present but blank (`?sort=`) counts as not given. A few parameters also answer to a second
 name (`q`/`search`, `sort`/`sortBy`, `order`/`dir`, `pageSize`/`limit`); sending two names of the
-same parameter is a `400` as well, because one of them would have to be ignored. The one exception
-is by design: the export has no pages and does not look at `page` and `pageSize`, so the query
-string of a list request can be reused for the export of the same rows as it is.
+same parameter is a `400` as well, because one of them would have to be ignored. The same goes for
+the sort direction, which can be written as `order=desc` or as a leading `-` (`sort=-issued`) but
+not both ways at once, and for `courseId` / `course_id` in the body of a bulk issue. The one
+exception is by design: the export has no pages and does not look at `page` and `pageSize`, so the
+query string of a list request can be reused for the export of the same rows as it is.
 
 | Method & path                              | Purpose |
 | ------------------------------------------ | ------- |
@@ -187,7 +206,7 @@ string of a list request can be reused for the export of the same rows as it is.
 | `GET /api/certificates/export.csv`         | CSV of everything matching the same `q`, `status`, `sort`, `order`. `HEAD` answers with the download's headers without running the export |
 | `GET /api/certificates/:id`                | Detail incl. `issuedLocal`, `issuedUtcOffset` and `auditEvents` |
 | `POST /api/certificates/:id/revoke`        | Revoke. Body `{"reason": "…"}` is optional. Idempotent |
-| `GET /api/courses`                         | Courses of the tenant, by title |
+| `GET /api/courses`                         | Courses of the tenant by title (generated load-test courses, if any, after the others) |
 | `GET /api/courses/:id/enrollments`         | Roster with per-learner eligibility and course totals, by learner name; `page`, `pageSize` (≤ 100) |
 | `POST /api/bulk-issues`                    | Bulk issue. Body `{"courseId": 1}`, header `Idempotency-Key` |
 | `GET /api/bulk-issues`, `GET /api/bulk-issues/:id` | Recent operations / the stored result of one |
@@ -217,7 +236,7 @@ curl -s -X POST -H "$A" "$URL/api/certificates/3/revoke"   # 200, "alreadyRevoke
 curl -s -H "$A" "$URL/api/certificates/export.csv?q=lee&sort=learner&order=asc"
 ```
 
-A bulk-issue response:
+A bulk-issue response (abridged: three of its five results):
 
 ```json
 {
@@ -319,13 +338,15 @@ search for `álvarez` would miss *Álvarez*, and *Élodie* would sort after *Zoe
 therefore stored twice - as written, and folded: learners and courses carry a key column, and each
 certificate carries the keys of its learner name and course title (`learner_name_key`,
 `course_title_key`), computed once when the row is written. Folding unifies compatibility forms
-(full-width letters, ligatures, non-breaking spaces), drops accents, lower-cases, and spells out
-the Latin letters that have no accent to drop (`ø`→`o`, `ł`→`l`, `ß`→`ss`, `æ`→`ae`, `ı`→`i`, …);
-other scripts are compared as written. Every ordering by name - certificate list, export, course
-picker, roster and with it the order of bulk-issue results - uses the stored key; searching folds
-the search text the same way and looks for it inside the key (or inside the serial number). An
-accent typed on its own (`´`) is nothing to search for and matches no row; `%`, `_` and `\` in a
-search are ordinary characters.
+(full-width letters, ligatures, non-breaking spaces), drops accents - in every script that writes
+them as separable marks, so Greek `ά` and Cyrillic `й` fold to `α` and `и` as well - lower-cases,
+and spells out the Latin letters that have no accent to drop (`ø`→`o`, `ł`→`l`, `ß`→`ss`,
+`æ`→`ae`, `ı`→`i`, …); beyond that, text is compared as written. Every ordering by name -
+certificate list, export, course picker, roster and with it the order of bulk-issue results - uses
+the stored key; searching folds the search text the same way and looks for it inside the key (or
+inside the serial number). A search that consists of nothing but accents typed on their own and
+spaces (`´`, `´ ´`) has nothing to look for and matches no row; `%`, `_` and `\` in a search are
+ordinary characters.
 
 **Export without blocking.** The export opens its own read-only connection and wraps the whole
 download in one read transaction: the file is a consistent snapshot even if certificates are issued
@@ -340,7 +361,10 @@ exports are running. Output is written with back-pressure; only the current batc
 
 Resources are bounded as well. At most `EXPORT_MAX_CONCURRENT` (4) exports read at the same time,
 each on its own connection; further ones wait in arrival order without holding a connection, and
-beyond 32 waiting the answer is `503 export_busy`. A client that disconnects releases its snapshot,
+beyond 32 waiting the answer is `503 export_busy`. An export connection keeps a page cache of
+1 MB - it reads one index from end to end and never returns to a page - so memory stays modest:
+with the 100,000 generated certificates the server process takes about 65 MB when idle, about
+125 MB while 4 full exports run and about 330 MB with 64 of them (`EXPORT_MAX_CONCURRENT=64`). A client that disconnects releases its snapshot,
 connection and slot within one step, even if its export has nothing to send at that moment. A
 client that stays connected but takes no more data is disconnected after `EXPORT_IDLE_TIMEOUT_MS`
 (5 minutes), so a stalled download cannot pin a snapshot (and with it the write-ahead log) for
@@ -351,6 +375,14 @@ reads steadily but slower than a few kB/s can therefore be cut off too; set the 
 to `0`, for such clients. Requests that a client sends ahead on one connection without waiting for
 the answers (HTTP pipelining) are answered in order, and an export among them only starts - and
 only then takes a slot - when its answer can actually be sent.
+
+A download that cannot be completed never ends quietly. When the server gives one up (the idle
+timeout, a failure while reading) it resets the connection instead of closing it, so that a client
+which does not check how the body is framed - HTTP/1.0, a simple script - cannot take half a file
+for a whole one. The other side of that rule: a client has to keep its sending side open until the
+download is complete. One that half-closes the connection right after its request (`nc -N`, a
+`shutdown(SHUT_WR)` in a script) cannot be told from one that has left, and gets the reset too.
+Browsers, `curl`, `wget` and HTTP libraries do not do that.
 
 **Idempotency details.** `Idempotency-Key` is optional for API callers (the UI always sends one).
 Keys are 1–200 printable ASCII characters. A request that is rejected before execution (400, 404,
@@ -379,14 +411,20 @@ moving very large bulk issues to a background job.
 ## 8. Project layout
 
 ```
+package.json, .npmrc       the commands of sections 1 and 4; npm settings (see section 9)
+scripts/                   preflight.mjs (Node version check before anything is installed),
+                           dev.mjs (`npm run dev`)
 backend/
-  src/server.js            entry point (claims the port, then schema + demo data on first run)
+  src/server.js            entry point (checks the settings, claims the port, then opens the database)
+  src/config.js            the settings of section 1: defaults, validation
+  src/bootstrap.js         opens the database: schema + demo data on first run, writability check
   src/app.js               routes, actor context, error mapping
   src/services/            certificates (list/detail/revoke/export), bulkIssue, courses, ledger, actors
   src/db/                  sqlite adapter, schema, demo seed, load-test generator
   src/lib/                 time zones, text folding (search/sort keys), CSV, request fingerprint,
-                           parameter parsing, limiter (export slots), turns (one step of long work
-                           per event-loop iteration), download (clients that stop reading)
+                           parameter parsing, errors (HTTP error type), limiter (export slots),
+                           turns (one step of long work per event-loop iteration), download
+                           (clients that stop reading)
   scripts/                 init-db.js (--reset), generate-certificates.js
   test/                    unit.test.js, acceptance.test.js (A1–A5, A7, failure injection, export
                            plumbing, start-up and maintenance commands), scale.test.js (A6),
@@ -394,7 +432,7 @@ backend/
 frontend/
   src/App.jsx              shell, actor switcher, hash routing
   src/components/          CertificatesPage, CertificateDetail (revoke dialog), BulkIssuePage,
-                           ErrorBoundary, ui
+                           ErrorBoundary, ui (states, pagination, modal dialog)
   src/api.js, hooks.js     API client (answers are checked before they are used), data-loading hook
   src/bulkIssueStore.js    bulk-issue attempts per actor: lock, status and idempotency key
   test/                    Vitest suites, test/support (fake server), test/fixtures (recorded API
@@ -429,6 +467,15 @@ docs/screenshots/          the images used in this README
   npm 10.9 (the npm of Node 22) cannot work out the dependency tree when the lockfile is missing
   and stops with `Cannot read properties of null (reading 'edgesOut')`. With the lockfile in
   place the setting changes nothing.
+- **"…was installed with another Node.js version"** – the native SQLite module is built for one
+  Node.js version. After switching versions run `npm rebuild better-sqlite3` (the message says so),
+  or start with `SQLITE_DRIVER=node` on Node ≥ 22.13.
+- **"the database cannot be written to" / "attempt to write a readonly database"** – the database
+  file or its directory is read-only for the user running the server. The server needs to write
+  to both (SQLite keeps its write-ahead log next to the file); fix the permissions or point
+  `DB_PATH` somewhere else.
+- **`npm run dev` says the dependencies are not installed** – it does not install anything itself:
+  run `npm start` (or `npm install`) once first.
 - **`better-sqlite3` could not be installed** – nothing to do on Node ≥ 22.13: the server logs
   `(node:sqlite)` on startup and uses the built-in driver. `SQLITE_DRIVER=node` forces it.
   Node 20 (and 22.12) has no built-in SQLite, so there the native module is required: npm downloads
@@ -442,7 +489,7 @@ docs/screenshots/          the images used in this README
 ## 中文速览
 
 - **启动**：`npm start`（自动安装依赖、构建前端、初始化演示数据并启动，访问 http://localhost:3000）
-- **验证测试**：`npm test`（接口测试 179 项，覆盖验收标准 A1–A7，含 10 万行导出；界面测试 231 项；约 1 分钟）
+- **验证测试**：`npm test`（接口测试 190 项，覆盖验收标准 A1–A7，含 10 万行导出；界面测试 252 项；约 1 分钟）
 - **生成 10 万条 East 证书**：`npm run generate:east`（不改动默认演示数据；`-- --clear` 可清除）
 - **恢复演示数据**：`npm run db:reset`（服务运行中也可执行）
 - **切换操作者**：页面右上角 *Acting as*，或在请求中带 `X-Actor-Email: alice@east.test` / `bob@west.test`

@@ -267,6 +267,44 @@ describe('Certificate list', () => {
     expect(lastListRequest(server).query.page).toBe('1');
   });
 
+  it('offers 5 rows per page, so that paging can be tried on the demo data as it is', async () => {
+    const { server, user } = openConsole();
+    const pagination = () => screen.getByRole('navigation', { name: 'Pagination' });
+    expect(await loadedRows()).toHaveLength(7);
+    expect(pagination().textContent).toContain('Page 1 of 1');
+    expect([...screen.getByTestId('page-size').options].map((option) => option.value)).toEqual(['5', '10', '25', '50', '100']);
+
+    await user.selectOptions(screen.getByTestId('page-size'), '5');
+    const firstPage = serials(await loadedRows());
+    expect(firstPage).toHaveLength(5);
+    expect(pagination().textContent).toContain('1–5 of 7 certificates');
+    expect(pagination().textContent).toContain('Page 1 of 2');
+
+    await user.click(within(pagination()).getByRole('button', { name: 'Next ›' }));
+    const secondPage = serials(await loadedRows());
+    expect(lastListRequest(server).query).toMatchObject({ page: '2', pageSize: '5' });
+    expect(secondPage).toHaveLength(2);
+    expect(pagination().textContent).toContain('6–7 of 7 certificates');
+    expect(secondPage.filter((serial) => firstPage.includes(serial))).toEqual([]);
+  });
+
+  it('opens a certificate on a click on its row, but not at the end of selecting text in it', async () => {
+    const { user } = openConsole();
+    await loadedRows();
+    const cell = screen.getByText('José Álvarez');
+
+    // Dragging over a name to copy it ends in a click on the row as well.
+    const selection = vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => 'José' });
+    await user.click(cell);
+    expect(window.location.hash).not.toContain('/certificates/');
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    selection.mockReturnValue({ toString: () => '' });
+    await user.click(cell);
+    await waitFor(() => expect(window.location.hash).toBe('#/certificates/4'));
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+
   it('starts over at page 1 when the filter or the sort order changes', async () => {
     const server = startFakeServer();
     server.tenant(ALICE).certificates = recorded.manyCertificates.items;

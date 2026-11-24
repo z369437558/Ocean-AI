@@ -1,15 +1,16 @@
 import './support/pin-settings.mjs'; // must stay first: see the file
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { Writable } from 'node:stream';
 import { after, before, describe } from 'node:test';
 
-import { loadConfig } from '../src/config.js';
+import { loadConfig, reachableHost } from '../src/config.js';
 import { formatGeneratedSerial } from '../src/db/generate.js';
 import { SCHEMA_VERSION, migrate } from '../src/db/schema.js';
 import { seedDemoData } from '../src/db/seed.js';
-import { TransactionAbortedError, enableWal, isBusyError, openDatabase } from '../src/db/sqlite.js';
+import { Connection, TransactionAbortedError, enableWal, isBusyError, openDatabase } from '../src/db/sqlite.js';
 import { csvCell, csvRow } from '../src/lib/csv.js';
 import { sendChunks } from '../src/lib/download.js';
 import { canonicalJson, requestFingerprint } from '../src/lib/fingerprint.js';
@@ -160,7 +161,6 @@ describe('list query parsing', () => {
     assert.equal(parseListQuery({ sort: 'learnerName', order: 'DESC' }).order, 'desc');
     assert.deepEqual(sortAndOrder({ sort: '-issued_at' }), { sort: 'issued', order: 'desc' });
     assert.deepEqual(sortAndOrder({ sort: '-learner' }), { sort: 'learner', order: 'desc' });
-    assert.deepEqual(sortAndOrder({ sort: '-learner', order: 'asc' }), { sort: 'learner', order: 'asc' }, 'an explicit order wins');
     assert.equal(parseListQuery({ search: '  lee ' }).q, 'lee');
   });
 
@@ -227,6 +227,11 @@ describe('list query parsing', () => {
         (err) => err.status === 400 && err.message === `Query parameters ${names} mean the same; send only one of them`,
         JSON.stringify(query),
       );
+    }
+    // A leading minus is a second way of giving the direction: together with "order" it is refused too,
+    // whether the two agree or not.
+    for (const query of [{ sort: '-learner', order: 'asc' }, { sort: '-learner', order: 'desc' }, { sortBy: '-issued', dir: 'asc' }]) {
+      assert.throws(() => parseListQuery(query), (err) => err.status === 400 && /sort direction once/.test(err.message), JSON.stringify(query));
     }
     // The second name is checked even when it is the one that would have been ignored...
     assert.throws(() => parseListQuery({ pageSize: '10', limit: 'abc' }), (err) => err.status === 400);
@@ -658,6 +663,62 @@ describe('database layer', () => {
     }
   });
 
+  it('notices at once when the database cannot be written to, without waiting for a busy writer', async () => {
+    const file = path.join(dir, 'unit.sqlite');
+    db.assertWritable();
+    assert.equal(db.inTransaction, false, 'it only asks');
+
+    // A connection that may not write stands in for a file the process may not write.
+    const reader = openDatabase(file, { queryOnly: true });
+    const other = openDatabase(file);
+    try {
+      assert.throws(() => reader.assertWritable(), /^Error: the database cannot be written to \(.*readonly.*\)$/i);
+      assert.equal(reader.get('PRAGMA cache_size').cache_size, -1024, 'export connections keep a small page cache');
+
+      // The real thing: a database opened read-only, as SQLite does by itself when the file cannot
+      // be opened for writing. There BEGIN IMMEDIATE succeeds (as a read transaction), so only an
+      // attempted write gives the situation away.
+      const raw =
+        db.driver === 'better-sqlite3'
+          ? new (await import('better-sqlite3')).default(file, { readonly: true })
+          : new (await import('node:sqlite')).DatabaseSync(file, { readOnly: true });
+      const readOnlyFile = new Connection(raw, file);
+      try {
+        readOnlyFile.exec('BEGIN IMMEDIATE'); // no error: this is why the check has to try a write
+        readOnlyFile.exec('ROLLBACK');
+        assert.throws(() => readOnlyFile.assertWritable(), /^Error: the database cannot be written to \(.*readonly.*\)$/i);
+        readOnlyFile.exec('BEGIN'); // would fail inside a transaction: the check left none open
+        readOnlyFile.exec('ROLLBACK');
+      } finally {
+        raw.close();
+      }
+
+      other.exec('BEGIN IMMEDIATE'); // somebody is writing: that the lock is taken shows the file can be written
+      const started = performance.now();
+      db.assertWritable();
+      assert.ok(performance.now() - started < 500, 'and is not waited for');
+      other.exec('ROLLBACK');
+      assert.equal(db.get('PRAGMA busy_timeout').timeout > 0, true, 'the normal lock wait is back in force');
+    } finally {
+      reader.close();
+      other.close();
+    }
+  });
+
+  it('creates missing directories for a new database, and fails plainly where it cannot', () => {
+    const nested = path.join(dir, 'made', 'on', 'demand', 'new.sqlite');
+    openDatabase(nested).close();
+    assert.equal(fs.existsSync(nested), true);
+
+    const blocker = path.join(dir, 'a-file');
+    fs.writeFileSync(blocker, 'not a directory');
+    assert.throws(() => openDatabase(path.join(blocker, 'sub', 'x.sqlite')), /ENOTDIR|EEXIST|not a directory/i);
+    // Below /proc Node's own recursive mkdir never returns; this must fail like any other bad path.
+    if (fs.existsSync('/proc/self')) {
+      assert.throws(() => openDatabase('/proc/no-such-entry/deeper/x.sqlite'), /ENOENT|EACCES|EPERM/);
+    }
+  });
+
   it('tells busy errors apart from everything else', () => {
     assert.equal(isBusyError(new Error('UNIQUE constraint failed: tenants.name')), false);
     assert.equal(isBusyError(null), false);
@@ -935,6 +996,15 @@ describe('text folding for search and sort', () => {
     assert.ok(foldText('ΟΔΥΣΣΕΥΣ').includes(foldText('ΥΣΣ')), 'a fragment cut out of an upper-case word still matches');
   });
 
+  it('drops accents in Greek and Cyrillic too: they are written with the same combining marks', () => {
+    assert.equal(foldText('Άλφα'), 'αλφα');
+    assert.equal(foldText('Ελένη Παπαδοπούλου'), 'ελενη παπαδοπουλου');
+    assert.equal(foldText('Йошкар-Ола'), 'иошкар-ола');
+    assert.equal(foldText('Алёна'), 'алена');
+    assert.equal(foldText('Київ'), 'киів');
+    assert.ok(foldText('Ελένη Παπαδοπούλου').includes(foldText('παπαδοπουλου')), 'typed without the accent, found all the same');
+  });
+
   it('leaves other scripts and symbols as they are', () => {
     assert.equal(foldText('李雷'), '李雷');
     assert.equal(foldText('한글'), '한글', 'Hangul stays composed');
@@ -1086,6 +1156,34 @@ describe('settings', () => {
     assert.equal(loadConfig({ EXPORT_IDLE_TIMEOUT_MS: '0' }).exportIdleTimeoutMs, 0, '0 switches the timeout off');
     assert.equal(loadConfig({ PORT: ' 8080 ' }).port, 8080);
     assert.equal(loadConfig({ EXPORT_MAX_CONCURRENT: '64' }).maxConcurrentExports, 64);
+  });
+
+  it('treat white space like an empty value, for text settings as well', () => {
+    const defaults = loadConfig({});
+    const blank = loadConfig({ HOST: '  ', DB_PATH: ' ', STATIC_DIR: '\t', LOG_REQUESTS: ' ' });
+    assert.deepEqual(
+      [blank.host, blank.dbPath, blank.staticDir, blank.logRequests],
+      [undefined, defaults.dbPath, defaults.staticDir, true],
+    );
+    assert.equal(loadConfig({ HOST: ' 127.0.0.1 ' }).host, '127.0.0.1');
+    assert.ok(loadConfig({ DB_PATH: ' x.sqlite ', INIT_CWD: '/somewhere' }).dbPath.endsWith('x.sqlite'));
+  });
+
+  it('switch the request log with 0 and 1 only', () => {
+    assert.equal(loadConfig({ LOG_REQUESTS: '0' }).logRequests, false);
+    assert.equal(loadConfig({ LOG_REQUESTS: '1' }).logRequests, true);
+    for (const value of ['false', 'off', 'no', 'yes', '2']) {
+      assert.throws(() => loadConfig({ LOG_REQUESTS: value }), new RegExp(`^Error: LOG_REQUESTS must be 0 \\(off\\) or 1 \\(on\\) \\(got "${value}"\\)$`), value);
+    }
+  });
+
+  it('print an address in the start-up line that leads to the server', () => {
+    assert.equal(reachableHost(undefined), 'localhost', 'all interfaces include localhost');
+    assert.equal(reachableHost('0.0.0.0'), 'localhost');
+    assert.equal(reachableHost('::'), 'localhost');
+    assert.equal(reachableHost('127.0.0.2'), '127.0.0.2', 'a specific address is the only one that answers');
+    assert.equal(reachableHost('example.test'), 'example.test');
+    assert.equal(reachableHost('::1'), '[::1]');
   });
 
   it('rejects unusable values in one line each', () => {
@@ -1472,5 +1570,41 @@ describe('sending a download to a client that may stop reading', () => {
     assert.equal(outcome.stalled, false);
     assert.equal(outcome.error.message, 'source failed');
     assert.equal(to.destroyed, true, 'the destination is not left open with half a file');
+  });
+
+  it('lets the caller decide how a transfer that cannot be completed is cut off', async () => {
+    const cuts = [];
+    const cutOff = (label, to) => () => {
+      cuts.push(label);
+      to.destroy();
+    };
+
+    const completed = destination();
+    assert.deepEqual(await sendChunks(source(3).chunks, completed, { idleTimeoutMs: 1_000, abandon: cutOff('completed', completed) }), { completed: true });
+
+    const stalled = destination({ stallAfter: 1 });
+    assert.equal((await sendChunks(source(20).chunks, stalled, { idleTimeoutMs: 100, abandon: cutOff('stalled', stalled) })).stalled, true);
+
+    const failing = destination();
+    const failed = await sendChunks(source(5, { failAt: 2 }).chunks, failing, { idleTimeoutMs: 1_000, abandon: cutOff('source failed', failing) });
+    assert.equal(failed.error.message, 'source failed');
+
+    const gone = new AbortController();
+    const left = destination({ stallAfter: 1 });
+    const leaving = sendChunks(source(20).chunks, left, { signal: gone.signal, abandon: cutOff('client left', left) });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    gone.abort();
+    assert.equal((await leaving).completed, false);
+
+    // The destination goes away by itself in the middle of the transfer (the client hung up):
+    // there is nothing left to cut off, and its error is not taken for a failure of the source.
+    const hungUp = destination({ delayMs: 20 });
+    const hanging = sendChunks(source(20).chunks, hungUp, { idleTimeoutMs: 1_000, abandon: cutOff('client hung up', hungUp) });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    hungUp.destroy(new Error('socket hang up'));
+    const afterHangUp = await hanging;
+    assert.deepEqual([afterHangUp.completed, afterHangUp.stalled, afterHangUp.error.message], [false, false, 'socket hang up']);
+
+    assert.deepEqual(cuts, ['stalled', 'source failed'], 'only for a stall and for a failing source; not when all went well or the client left by itself');
   });
 });

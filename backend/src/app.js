@@ -235,11 +235,27 @@ export function createApp({
 
       // The download itself. A client that stops reading must not keep the connection, the
       // snapshot and the slot for ever: see sendChunks for what counts as "stopped".
+      //
+      // A download that cannot be completed is never ended quietly: the connection is reset. A
+      // quiet end would look like the end of the file to a client without chunk framing
+      // (HTTP/1.0), which would take half an export for a whole one. That includes the client
+      // that closes its sending side while it is still reading: Node answers that by ending the
+      // response, which cannot be told from the client having left - so this listener gets in
+      // first, for as long as the download runs.
+      const socket = req.socket;
+      const cutOff = () => socket.resetAndDestroy();
+      socket.prependOnceListener('end', cutOff);
       res.status(200).set(downloadHeaders);
-      const outcome = await sendChunks(startingWith(first, chunks), res, {
-        idleTimeoutMs: exportIdleTimeoutMs,
-        signal: connection.signal,
-      });
+      let outcome;
+      try {
+        outcome = await sendChunks(startingWith(first, chunks), res, {
+          idleTimeoutMs: exportIdleTimeoutMs,
+          signal: connection.signal,
+          abandon: cutOff,
+        });
+      } finally {
+        socket.off('end', cutOff);
+      }
       if (outcome.stalled) {
         logger.log(`[export] download dropped: the client took no more data for ${exportIdleTimeoutMs} ms`);
       } else if (!outcome.completed && outcome.error.code !== 'ERR_STREAM_PREMATURE_CLOSE') {

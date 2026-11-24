@@ -174,7 +174,7 @@ describe('CSV export', () => {
     server.once('GET', '/api/certificates/export.csv', () => ({
       ok: true,
       status: 200,
-      headers: new Headers({ 'Content-Disposition': recorded.tenants[ALICE].exportCsv.contentDisposition }),
+      headers: new Headers({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': recorded.tenants[ALICE].exportCsv.contentDisposition }),
       blob: async () => {
         throw new TypeError('network error');
       },
@@ -182,6 +182,46 @@ describe('CSV export', () => {
     await user.click(screen.getByTestId('export-button'));
     expect((await screen.findByRole('alert')).textContent).toContain('Export failed: The answer from the server could not be read');
     expect(saved).toEqual([]);
+  });
+
+  it('does not save an answer that is not the export, and says so', async () => {
+    const saved = captureDownloads();
+    const server = startFakeServer();
+    const { user } = openConsole({ server });
+    await loadedRows();
+
+    // What a gateway in front of the console might answer in place of the file.
+    server.once('GET', '/api/certificates/export.csv', () => new Response('<!doctype html><title>Sign in</title>', { status: 200, headers: { 'Content-Type': 'text/html' } }));
+    await user.click(screen.getByTestId('export-button'));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Export failed: The server sent an answer that is not a CSV export.');
+    expect(saved).toEqual([]);
+    expect(screen.queryByTestId('export-done')).toBeNull();
+
+    await user.click(within(alert).getByRole('button', { name: 'Try again' }));
+    await screen.findByTestId('export-done');
+    expect(saved).toHaveLength(1);
+  });
+
+  it('starts one export, however quickly the button is pressed again', async () => {
+    const saved = captureDownloads();
+    const server = startFakeServer();
+    openConsole({ server });
+    await loadedRows();
+
+    // Five clicks in one go: no render happens between them, so nothing on screen could stop the
+    // second one - the page has to remember by itself that an export is under way.
+    const button = screen.getByTestId('export-button');
+    act(() => {
+      for (let i = 0; i < 5; i += 1) button.click();
+    });
+    await screen.findByTestId('export-done');
+    expect(exportRequests(server)).toHaveLength(1);
+    expect(saved).toHaveLength(1);
+
+    // ...and is free for the next one afterwards.
+    act(() => button.click());
+    await waitFor(() => expect(exportRequests(server)).toHaveLength(2));
   });
 
   it("exports the other tenant's file after an actor switch", async () => {

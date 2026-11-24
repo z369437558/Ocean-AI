@@ -45,6 +45,9 @@ function parseCourseId(body) {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     throw badRequest('Request body must be a JSON object such as {"courseId": 1}');
   }
+  if (body.courseId != null && body.course_id != null) {
+    throw badRequest('"courseId" and "course_id" mean the same; send only one of them');
+  }
   const value = body.courseId ?? body.course_id;
   const courseId = Number.isSafeInteger(value) && value > 0 ? value : pathId(typeof value === 'string' ? value : '');
   if (courseId === null) throw badRequest('"courseId" is required and must be a positive integer');

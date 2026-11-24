@@ -532,6 +532,12 @@ describe('A6 - 100,000-certificate export', { timeout: 300_000 }, () => {
 
     assertSameSnapshot(quickStartSnapshot(db), before100k, 'after the reset');
     assert.equal(db.get('SELECT COUNT(*) AS n FROM certificates').n, SEED.east.certificateCount + SEED.west.certificateCount);
+    // Nothing of the load-test data stays behind, the planner's statistics about it included:
+    // the file has the size of a database that never held more than the demo data.
+    assert.deepEqual(db.all("SELECT name FROM sqlite_master WHERE name LIKE 'sqlite_stat%'"), []);
+    const pristine = path.join(dir, 'pristine.sqlite');
+    await runScript('init-db.js', ['--db', pristine]);
+    assert.equal(db.get('PRAGMA page_count').page_count, fs.statSync(pristine).size / db.get('PRAGMA page_size').page_size);
     assert.equal(db.get('SELECT last_serial FROM tenants WHERE id = 1').last_serial, SEED.east.certificateCount);
     assert.equal((await alice.get('/api/certificates')).json.total, SEED.east.certificateCount);
     assert.equal((await alice.bulkIssue(SEED.east.safety101, 'after-reset')).json.summary.issued, 2, 'the server carries on with the fresh data');

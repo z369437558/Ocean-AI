@@ -167,6 +167,7 @@ describe('Bulk issue: a roster of several pages', () => {
     expect(pagesAskedFor(server, 1)).toEqual(['1', '2', '3']);
     await rosterLoaded();
     expect(issueButton().textContent).toBe('Issue 2 certificates'); // paging changes nothing about what will be issued
+    expect(issueButton().disabled).toBe(false);
 
     await user.selectOptions(screen.getByTestId('course-select'), 'First Aid Refresher');
     await waitFor(() => expect(rosterNames()).toEqual(['Alex Lee', 'José Álvarez']));
@@ -195,6 +196,11 @@ describe('Bulk issue: one submission, visible status', () => {
       'Issuing certificates for Safety 101… Please wait; the button is locked until the server has answered.',
     );
     expect(screen.queryByTestId('operation-result')).toBeNull();
+    // The course belongs to the request that is on its way, whatever tries to change the picker.
+    fireEvent.change(screen.getByTestId('course-select'), { target: { value: '2' } });
+    await settle();
+    expect(screen.getByTestId('course-select').value).toBe('1');
+    expect(server.sent('GET', '/api/courses/2/enrollments')).toEqual([]);
 
     gate.resolve();
     await screen.findByTestId('operation-result');
@@ -219,6 +225,80 @@ describe('Bulk issue: one submission, visible status', () => {
     gate.resolve();
     await screen.findByTestId('operation-result');
     expect(bulkIssuePosts(server)).toHaveLength(1);
+  });
+
+  it('stays locked from the answer until the roster on screen reflects the run: clicks in between start nothing', async () => {
+    const server = startFakeServer();
+    const gate = holdBulkIssue(server);
+    const rosterAfterRun = deferred();
+    const { user } = await openBulkIssue({ server });
+    await chooseCourse(user, 'Safety 101');
+    await user.click(issueButton());
+    server.on('GET', '/api/courses/1/enrollments', async (_request, respond) => {
+      await rosterAfterRun.promise; // the roster that reflects the run takes its time
+      return respond();
+    });
+
+    // A bouncing key or a script: one click in every turn of the event loop and one more after
+    // every change of the button, from before the answer until the page has come to rest. The
+    // page learns the result in one render and starts to reload the roster only after it; the
+    // clicks in between used to find "Issue 2 certificates" enabled and sent a second operation.
+    let clicksInBetween = 0; // those that fell between the answer and the refreshed roster
+    let hammering = true;
+    const click = () => {
+      const answered = operationStatus().getAttribute('data-state') === 'succeeded';
+      if (answered && screen.getByTestId('eligible-count').textContent === '2') clicksInBetween += 1;
+      issueButton().click();
+    };
+    const everyTurn = () => {
+      if (!hammering) return;
+      click();
+      setImmediate(everyTurn);
+    };
+    const onEveryChange = new MutationObserver(click);
+    onEveryChange.observe(issueButton(), { attributes: true, childList: true, characterData: true, subtree: true });
+    setImmediate(everyTurn);
+    try {
+      gate.resolve();
+      await screen.findByTestId('operation-result');
+      await settle();
+
+      // The answer is in, the roster still shows the time before the run: locked, and no number
+      // on the button that the roster on its way may contradict.
+      expect(operationStatus().getAttribute('data-state')).toBe('succeeded');
+      expect(screen.getByTestId('eligible-count').textContent).toBe('2');
+      expect(document.querySelector('.is-refreshing')).not.toBeNull();
+      expect(issueButton().disabled).toBe(true);
+      expect(issueButton().textContent).toBe('Issue certificates');
+      expect(bulkIssuePosts(server)).toHaveLength(1);
+
+      rosterAfterRun.resolve();
+      await waitFor(() => expect(issueButton().textContent).toBe('No eligible learners'));
+      await settle();
+    } finally {
+      hammering = false;
+      onEveryChange.disconnect();
+    }
+
+    expect(clicksInBetween).toBeGreaterThan(0); // the test did click where it matters
+    expect(bulkIssuePosts(server)).toHaveLength(1);
+    expect(server.tenant(ALICE).operations).toHaveLength(1);
+    expect(within(resultPanel()).getByRole('heading').textContent).toBe('Operation #1 · Safety 101'); // not replaced by a second one
+    expect(summaryCounts()).toEqual(['2', '3', '0']);
+  });
+
+  it('unlocks for the learners that are still eligible once the refreshed roster is there', async () => {
+    const { server, user } = await openBulkIssue({ actor: BOB });
+    await chooseCourse(user, 'Safety 101'); // West: one learner fails in the recorded run and stays eligible
+    await user.click(issueButton());
+    await screen.findByTestId('operation-result');
+    await rosterLoaded();
+    expect(issueButton().textContent).toBe('Issue 1 certificate');
+    expect(issueButton().disabled).toBe(false);
+
+    await user.click(issueButton()); // a deliberate second operation, with a key of its own
+    await waitFor(() => expect(bulkIssuePosts(server)).toHaveLength(2));
+    expect(new Set(idempotencyKeys(server)).size).toBe(2);
   });
 
   it('sends the course, a fresh idempotency key and the actor', async () => {
@@ -270,6 +350,57 @@ describe('Bulk issue: result', () => {
       ['#1', 'Safety 101', ALICE, '2', '3', '0'],
     ]);
     expect(bulkIssuePosts(server)).toHaveLength(1);
+  });
+
+  it('says how the run ended in the status region, where its start was announced, and leads to the outcomes', async () => {
+    const server = startFakeServer();
+    const gate = holdBulkIssue(server);
+    const { user } = await openBulkIssue({ server });
+    await chooseCourse(user, 'Safety 101');
+    await user.click(issueButton());
+    const status = operationStatus();
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    expect(status.textContent).toContain('Issuing certificates for Safety 101…');
+
+    gate.resolve();
+    await screen.findByTestId('operation-result');
+    expect(operationStatus()).toBe(status); // the same live region: its new text is what gets announced
+    const announcement = within(status).getByTestId('operation-announcement');
+    expect(announcement.textContent).toBe('Operation #1 for Safety 101 completed: 2 issued, 3 skipped, 0 failed. Show outcomes');
+    expect(announcement.className).toBe('note note-success');
+    expect(resultPanel().contains(announcement)).toBe(false);
+
+    const heading = within(resultPanel()).getByRole('heading');
+    expect(document.activeElement).not.toBe(heading);
+    await user.click(within(announcement).getByRole('button', { name: 'Show outcomes' }));
+    expect(document.activeElement).toBe(heading);
+
+    await user.click(within(resultPanel()).getByRole('button', { name: 'Dismiss' }));
+    expect(status.textContent).toBe(''); // gone with the result it spoke of
+  });
+
+  it('announces a run with failed learners without calling it a success, and a repeated request as a repeat', async () => {
+    const west = await openBulkIssue({ actor: BOB });
+    await chooseCourse(west.user, 'Safety 101');
+    await west.user.click(issueButton());
+    await screen.findByTestId('operation-result');
+    const announcement = screen.getByTestId('operation-announcement');
+    expect(announcement.textContent).toBe(
+      `Operation #${westRunWithFailure.id} for Safety 101 completed: 1 issued, 3 skipped, 1 failed. Show outcomes`,
+    );
+    expect(announcement.className).toBe('note');
+    west.unmount();
+
+    const server = startFakeServer();
+    loseAnswerOnce(server);
+    const east = await openBulkIssue({ server });
+    await chooseCourse(east.user, 'Safety 101');
+    await east.user.click(issueButton());
+    await east.user.click(await screen.findByTestId('retry-button'));
+    await screen.findByTestId('operation-result');
+    expect(screen.getByTestId('operation-announcement').textContent).toBe(
+      'Operation #1 for Safety 101 completed: 2 issued, 3 skipped, 0 failed. It repeats an earlier request, so nothing was issued twice. Show outcomes',
+    );
   });
 
   it('filters the outcomes and can be dismissed', async () => {
@@ -548,6 +679,72 @@ describe('Bulk issue: when the answer is lost', () => {
     expect(keys).toHaveLength(2);
     expect(keys[1]).toMatch(UUID);
     expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  it.each([
+    ['may or may not have gone through', (server) => loseAnswerOnce(server)],
+    ['has not run yet', (server) => server.once('POST', '/api/bulk-issues', () => errorAnswer(recorded.errors.databaseBusy))],
+  ])('keeps course, prompt and key while the bulk issue "%s": the course picker is locked until Retry or Dismiss', async (wording, fail) => {
+    const server = startFakeServer();
+    fail(server);
+    const { user } = await openBulkIssue({ server });
+    await chooseCourse(user, 'Safety 101');
+    await user.click(issueButton());
+    await screen.findByTestId('retry-button');
+    expect(operationStatus().textContent).toContain(`The bulk issue for Safety 101 ${wording}`);
+    const stored = window.sessionStorage.getItem('cert-admin.bulk-issue.unsettled');
+    expect(stored).toContain(idempotencyKeys(server)[0]);
+
+    const select = screen.getByTestId('course-select');
+    expect(select.disabled).toBe(true);
+    const hint = document.getElementById(select.getAttribute('aria-describedby'));
+    expect(hint.textContent).toContain('The course stays selected until this attempt has been retried or dismissed.');
+    expect(within(operationStatus()).getByRole('alert').contains(hint)).toBe(true);
+
+    // Whatever changes the picker all the same (a script, a browser that restores form values):
+    // a look at another course must not cost the prompt and the key that makes the retry safe.
+    fireEvent.change(select, { target: { value: '2' } });
+    await settle();
+    expect(select.value).toBe('1');
+    expect(screen.getByTestId('retry-button')).toBeTruthy();
+    expect(operationStatus().textContent).toContain(`The bulk issue for Safety 101 ${wording}`);
+    expect(window.sessionStorage.getItem('cert-admin.bulk-issue.unsettled')).toBe(stored);
+    expect(server.sent('GET', '/api/courses/2/enrollments')).toEqual([]);
+
+    await user.click(screen.getByTestId('retry-button'));
+    await screen.findByTestId('operation-result');
+    expect(new Set(idempotencyKeys(server)).size).toBe(1); // the retry went out under the key of the attempt
+    expect(select.disabled).toBe(false); // settled: the picker is free again
+    expect(select.getAttribute('aria-describedby')).toBeNull();
+    expect(window.sessionStorage.getItem('cert-admin.bulk-issue.unsettled')).toBeNull();
+    await user.selectOptions(select, 'Forklift Operations'); // and moving on dismisses the result as before
+    expect(screen.queryByTestId('operation-result')).toBeNull();
+    expect(operationStatus().getAttribute('data-state')).toBe('idle');
+  });
+
+  it('frees the course picker when the open attempt is dismissed, and after a rejection never locks it', async () => {
+    const server = startFakeServer();
+    loseAnswerOnce(server);
+    const { user } = await openBulkIssue({ server });
+    await chooseCourse(user, 'Safety 101');
+    await user.click(issueButton());
+    await screen.findByTestId('retry-button');
+    const select = screen.getByTestId('course-select');
+    expect(select.disabled).toBe(true);
+    await user.click(within(operationStatus()).getByRole('button', { name: 'Dismiss' })); // the admin's decision
+    expect(select.disabled).toBe(false);
+    expect(window.sessionStorage.getItem('cert-admin.bulk-issue.unsettled')).toBeNull();
+
+    // A definite "no" (4xx) leaves nothing open: no retry, no key worth keeping, no lock.
+    await user.selectOptions(select, 'First Aid Refresher');
+    await rosterLoaded();
+    server.once('POST', '/api/bulk-issues', () => json(404, { error: { code: 'not_found', message: 'Course not found' } }));
+    await user.click(issueButton());
+    await waitFor(() => expect(operationStatus().textContent).toContain('The bulk issue for First Aid Refresher was rejected'));
+    expect(select.disabled).toBe(false);
+    await user.selectOptions(select, 'Safety 101');
+    expect(operationStatus().getAttribute('data-state')).toBe('idle');
+    expect(operationStatus().textContent).toBe('');
   });
 
   it('forgets the retry prompt when it is dismissed; the next attempt is a new operation with a new key', async () => {

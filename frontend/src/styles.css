@@ -29,6 +29,14 @@
   box-sizing: border-box;
 }
 
+html {
+  /* The top bar sticks to the top of the window and covers what scrolls underneath it. Whatever
+     the browser scrolls into view - the control Tab lands on, a heading the page points to - has to
+     end up below the bar, not behind it. App.jsx measures the bar (it wraps on a narrow window) and
+     reports 0 where it does not stick; the fallback is its height in one row. */
+  scroll-padding-top: calc(var(--topbar-height, 4.75rem) + 0.75rem);
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -77,6 +85,12 @@ a {
 
 .nowrap {
   white-space: nowrap;
+}
+
+/* Text that was typed into a field of several lines: its line breaks are part of it. */
+.as-typed {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .sr-only {
@@ -277,9 +291,10 @@ a:focus-visible {
   outline-offset: 1px;
 }
 
-/* A heading that a script moved the focus to ("View outcomes" for the result already on screen).
-   Marked for everyone, also after a mouse click, which :focus-visible would leave unmarked: here
-   the outline is the feedback that the click did something. */
+/* A heading that a script moved the focus to ("View outcomes" for the result already on screen);
+   it is focusable only while it has that focus. Marked for everyone, also after a mouse click on
+   the button, which :focus-visible would leave unmarked: here the outline is the feedback that the
+   click did something. */
 h2[tabindex='-1']:focus {
   outline: 2px solid var(--primary);
   outline-offset: 4px;
@@ -706,6 +721,7 @@ th[aria-sort='descending'] .sort-arrow {
   width: min(520px, 100%);
   height: 100%;
   overflow-y: auto;
+  scroll-padding-top: 4.5rem; /* its header sticks as well: see html above */
   display: flex;
   flex-direction: column;
 }
@@ -815,5 +831,13 @@ th[aria-sort='descending'] .sort-arrow {
 
   .panel {
     padding: 0.9rem;
+  }
+}
+
+/* On a small window (a phone, or a desktop window at 200 % zoom) the top bar would take a fifth to
+   a third of the screen if it stayed in view, so there it scrolls away with the page. */
+@media (max-width: 720px), (max-height: 480px) {
+  .topbar {
+    position: static;
   }
 }

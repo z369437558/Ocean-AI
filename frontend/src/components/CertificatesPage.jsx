@@ -25,7 +25,8 @@ const SORT_OPTIONS = [
   { value: 'status:desc', label: 'Status – revoked first' },
 ];
 
-const PAGE_SIZES = [10, 25, 50, 100];
+// 5 is there so that paging can be tried on the demo data, which has 7 and 4 certificates.
+const PAGE_SIZES = [5, 10, 25, 50, 100];
 
 /**
  * The search text as it is sent to the server. Pasted text easily carries tabs or line breaks
@@ -73,9 +74,13 @@ export default function CertificatesPage({ api, actor, selectedCertificateId }) 
   // screen to explain it, possibly a file of tenant A while the console is acting as tenant B.
   const exportAbort = useRef(null);
   useEffect(() => () => exportAbort.current?.abort(), []);
+  // One export at a time per window. A ref, because state only changes with the next render and
+  // would let through a second click that arrives before it.
+  const exporting = useRef(false);
 
   async function handleExport() {
-    if (exportState.status === 'running') return; // one export at a time per window
+    if (exporting.current) return;
+    exporting.current = true;
     const q = toSearchQuery(searchText);
     setSearch(q); // apply pending keystrokes now, so the table and the file show the same rows
     setExportState({ status: 'running' });
@@ -87,6 +92,8 @@ export default function CertificatesPage({ api, actor, selectedCertificateId }) 
     } catch (error) {
       if (controller.signal.aborted) return; // the page is gone: nothing to report, nobody to tell
       setExportState({ status: 'error', error });
+    } finally {
+      exporting.current = false;
     }
   }
 
@@ -273,7 +280,11 @@ export default function CertificatesPage({ api, actor, selectedCertificateId }) 
                   <tr
                     key={certificate.id}
                     className={certificate.id === selectedCertificateId ? 'row-link row-selected' : 'row-link'}
-                    onClick={() => navigate(`/certificates/${certificate.id}`)}
+                    onClick={() => {
+                      // Dragging over a name to copy it ends in a click on the row as well.
+                      if (window.getSelection?.()?.toString()) return;
+                      navigate(`/certificates/${certificate.id}`);
+                    }}
                   >
                     <td>
                       <a

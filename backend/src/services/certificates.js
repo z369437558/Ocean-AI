@@ -86,8 +86,10 @@ export function parseListQuery(query, { paginate = true } = {}) {
   let sortText = (queryString(query, ['sort', 'sortBy']) ?? 'issued').toLowerCase();
   let order = queryString(query, ['order', 'dir', 'direction', 'sortOrder'])?.toLowerCase();
   if (sortText.startsWith('-')) {
+    // "-learner" is short for descending; next to an explicit order one of the two would have to give way.
+    if (order !== undefined) throw badRequest('Give the sort direction once: either as a leading "-" on "sort" or as "order"');
     sortText = sortText.slice(1);
-    order ??= 'desc';
+    order = 'desc';
   }
   const sort = SORT_ALIASES.get(sortText);
   if (!sort) throw badRequest(`"sort" must be one of: ${Object.keys(SORTS).join(', ')}`);
@@ -124,7 +126,9 @@ function buildFilter(actor, { q, status }) {
   const params = { tenantId: actor.tenantId };
   const narrowing = [];
   if (q) {
-    const needle = foldText(q);
+    // Trimmed again after folding: accents typed on their own fold to nothing, and what is left of
+    // "´ ´" would be the space between them - found in every "first last" name.
+    const needle = foldText(q).trim();
     if (needle) {
       narrowing.push("(instr(c.learner_name_key, @needle) > 0 OR c.serial_number LIKE @serialPattern ESCAPE '\\')");
       params.needle = needle;

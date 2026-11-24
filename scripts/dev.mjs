@@ -7,18 +7,25 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(path.join(root, 'frontend', 'package.json'));
-const viteBin = path.join(path.dirname(require.resolve('vite/package.json')), 'bin', 'vite.js');
+let viteBin;
+try {
+  viteBin = path.join(path.dirname(require.resolve('vite/package.json')), 'bin', 'vite.js');
+} catch {
+  console.error('The dependencies are not installed yet. Run "npm start" once (or "npm install"), then "npm run dev" again.');
+  process.exit(1);
+}
+const apiPort = process.env.PORT?.trim() || '3000'; // blank counts as not set, as everywhere else
 
 const children = [
   spawn(process.execPath, ['--watch', 'src/server.js'], {
     cwd: path.join(root, 'backend'),
     stdio: 'inherit',
-    env: { ...process.env, PORT: process.env.PORT ?? '3000' },
+    env: { ...process.env, PORT: apiPort },
   }),
   spawn(process.execPath, [viteBin], {
     cwd: path.join(root, 'frontend'),
     stdio: 'inherit',
-    env: { ...process.env, API_URL: `http://localhost:${process.env.PORT ?? '3000'}` },
+    env: { ...process.env, API_URL: `http://localhost:${apiPort}` },
   }),
 ];
 

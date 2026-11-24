@@ -51,6 +51,30 @@ const expectStatusInList = (serial, status) =>
     expect(row?.[4]).toBe(status);
   });
 
+/**
+ * What a browser does when the focused control gets disabled: the focus drops to <body>. The
+ * simulated DOM leaves it on the disabled control, so a test that depends on it says so with this.
+ */
+function dropFocusToBody() {
+  const elsewhere = document.body.appendChild(document.createElement('button'));
+  elsewhere.focus();
+  elsewhere.blur();
+  elsewhere.remove();
+  expect(document.activeElement).toBe(document.body);
+}
+
+/** Runs `check` with the real stylesheet in place (the simulated DOM has no layout, but it has styles). */
+async function withStyles(check) {
+  const sheet = document.createElement('style');
+  sheet.textContent = STYLES;
+  document.head.append(sheet);
+  try {
+    return await check();
+  } finally {
+    sheet.remove();
+  }
+}
+
 /** Opens certificate 4 (active) and the revoke confirmation on top of it. */
 async function openRevokeConfirmation(options) {
   const view = await openCertificate(4, options);
@@ -164,7 +188,9 @@ describe('Certificate detail', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(window.location.hash).toBe('#/certificates');
     expect((await loadedRows()).every((cells) => cells[0].startsWith('WEST-'))).toBe(true);
-    expect(server.sent('GET', '/api/certificates/1').filter((request) => request.actor === BOB && !request.aborted)).toEqual([]);
+    // Not even one that is cancelled a moment later: by then the server has been asked, and has
+    // logged a lookup of another tenant's id under Bob's name.
+    expect(server.sent('GET', '/api/certificates/1').filter((request) => request.actor === BOB)).toEqual([]);
   });
 });
 
@@ -249,6 +275,26 @@ describe('Revocation', () => {
 
     await expectStatusInList('EAST-0000004', 'Revoked');
     expect(server.sent('GET', '/api/certificates')).toHaveLength(listRequests + 1); // the list was reloaded once
+  });
+
+  it('shows a reason of several lines with its line breaks, in the drawer and in the audit trail', async () => {
+    await withStyles(async () => {
+      const { server, user } = await openRevokeConfirmation();
+      await user.type(screen.getByTestId('revoke-reason'), 'Issued in error:{Enter}the assessment was not signed off');
+      await user.click(screen.getByTestId('revoke-confirm'));
+      await screen.findByTestId('revoke-result');
+      expect(server.sent('POST', REVOKE_4)[0].body).toEqual({ reason: 'Issued in error:\nthe assessment was not signed off' });
+
+      const shown = [...detail().querySelectorAll('.as-typed')];
+      expect(shown.map((element) => element.textContent)).toEqual([
+        'Issued in error:\nthe assessment was not signed off', // the "Revocation reason" field
+        'Issued in error:\nthe assessment was not signed off', // the audit event
+      ]);
+      expect(shown[0].closest('.detail-field').querySelector('dt').textContent).toBe('Revocation reason');
+      expect(screen.getByTestId('audit-trail').contains(shown[1])).toBe(true);
+      // The line break is in the text; this is what makes the browser show it as one.
+      for (const element of shown) expect(getComputedStyle(element).whiteSpace).toBe('pre-wrap');
+    });
   });
 
   it('sends no reason when none was given', async () => {
@@ -631,6 +677,149 @@ describe('Revocation with an unknown outcome (item E)', () => {
   });
 });
 
+describe('Dialogs are modal: only the top-most one can be operated', () => {
+  const drawer = () => screen.getByRole('dialog', { name: 'Certificate details' });
+  const inert = (element) => element.closest('[inert]') !== null;
+  const topBar = () => document.querySelector('.topbar');
+  const listPanel = () => screen.getByTestId('certificate-list').closest('section');
+
+  it('keeps Tab and Shift+Tab inside the drawer and takes the page behind it out of reach', async () => {
+    const { user } = await openCertificate(4);
+    await detailLoaded();
+    expect(document.activeElement).toBe(drawer());
+    expect(inert(topBar())).toBe(true); // tabs and the actor switcher
+    expect(inert(listPanel())).toBe(true); // search, table links, export
+    expect(inert(drawer())).toBe(false);
+    screen.getByTestId('search-input').focus(); // nothing behind the drawer takes the focus
+    expect(document.activeElement).toBe(drawer());
+
+    const close = within(drawer()).getByRole('button', { name: 'Close details' });
+    const revoke = screen.getByTestId('revoke-button');
+    await user.tab();
+    expect(document.activeElement).toBe(close);
+    await user.tab();
+    expect(document.activeElement).toBe(revoke);
+    await user.tab(); // past the last control: around to the first one, not on to the top bar
+    expect(document.activeElement).toBe(close);
+    await user.tab({ shift: true }); // and backwards: to the last one, not into the table behind
+    expect(document.activeElement).toBe(revoke);
+
+    drawer().focus(); // where the focus is right after opening
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(revoke);
+
+    dropFocusToBody(); // wherever the focus got lost to: the next Tab leads back in
+    await user.tab();
+    expect(document.activeElement).toBe(close);
+    dropFocusToBody();
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(revoke);
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(document.querySelector('[inert]')).toBeNull(); // the page is back in reach
+    screen.getByTestId('search-input').focus();
+    expect(document.activeElement).toBe(screen.getByTestId('search-input'));
+  });
+
+  it('returns the focus to the link that opened the drawer, which is out of reach while the drawer is open', async () => {
+    const { user } = openConsole();
+    await loadedRows();
+    const link = screen.getByRole('link', { name: 'EAST-0000003' });
+    await user.click(link);
+    await detailLoaded();
+    expect(document.activeElement).toBe(drawer());
+    expect(inert(link)).toBe(true);
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(inert(link)).toBe(false);
+    expect(document.activeElement).toBe(link); // the keyboard continues where it left the list
+  });
+
+  it('keeps Tab inside the confirmation; the drawer underneath is out of reach until it closes', async () => {
+    const { user } = await openRevokeConfirmation();
+    const dialog = confirmation();
+    expect(document.activeElement).toBe(dialog);
+    expect(inert(drawer())).toBe(true);
+    expect(inert(topBar())).toBe(true);
+    expect(inert(listPanel())).toBe(true);
+    expect(inert(dialog)).toBe(false);
+
+    const reason = screen.getByTestId('revoke-reason');
+    const cancel = within(dialog).getByRole('button', { name: 'Cancel' });
+    const confirm = screen.getByTestId('revoke-confirm');
+    await user.tab();
+    expect(document.activeElement).toBe(reason);
+    await user.tab();
+    expect(document.activeElement).toBe(cancel);
+    await user.tab();
+    expect(document.activeElement).toBe(confirm);
+    await user.tab(); // not on to <body> and the tabs of the page
+    expect(document.activeElement).toBe(reason);
+    await user.tab({ shift: true }); // not back to the drawer's buttons
+    expect(document.activeElement).toBe(confirm);
+
+    await user.keyboard('{Escape}'); // closes the confirmation only
+    expect(queryConfirmation()).toBeNull();
+    expect(inert(drawer())).toBe(false); // the drawer is the top-most dialog again ...
+    expect(document.activeElement).toBe(screen.getByTestId('revoke-button'));
+    expect(inert(topBar())).toBe(true); // ... and the page behind it still is not
+    expect(inert(listPanel())).toBe(true);
+    await user.tab();
+    expect(document.activeElement).toBe(within(drawer()).getByRole('button', { name: 'Close details' }));
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(document.querySelector('[inert]')).toBeNull();
+  });
+
+  it('a confirmation whose request is in flight cannot be left or closed from the keyboard, the drawer behind it included', async () => {
+    const server = startFakeServer();
+    const gate = deferred();
+    server.once('POST', REVOKE_4, async (_request, respond) => {
+      await gate.promise;
+      return respond();
+    });
+    const { user } = await openRevokeConfirmation({ server });
+    await user.click(screen.getByTestId('revoke-confirm'));
+    expect(screen.getByTestId('revoke-confirm').disabled).toBe(true);
+    dropFocusToBody(); // as in a browser: the button that was clicked is disabled now
+
+    // What used to work: Shift+Tab, Shift+Tab reached "Close details" of the drawer, and Enter
+    // pressed it - drawer and confirmation gone, and nobody told how the revocation ended.
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(confirmation()); // every control is disabled: the focus rests on the dialog
+    await user.tab({ shift: true });
+    await user.keyboard('{Enter}');
+    await user.tab();
+    await user.tab();
+    expect(document.activeElement).toBe(confirmation());
+    await user.keyboard('{Enter}');
+    await user.keyboard('{Escape}');
+    expect(queryConfirmation()).not.toBeNull();
+    expect(drawer()).toBeTruthy();
+    expect(inert(drawer())).toBe(true);
+    expect(window.location.hash).toBe('#/certificates/4');
+
+    gate.resolve();
+    expect((await screen.findByTestId('revoke-result')).textContent).toBe('The certificate has been revoked.');
+    expect(queryConfirmation()).toBeNull();
+    expect(inert(drawer())).toBe(false);
+    expect(server.sent('POST', REVOKE_4)).toHaveLength(1);
+  });
+
+  it('gives the page back when a deep link is left with both dialogs open', async () => {
+    await openRevokeConfirmation();
+    expect(document.querySelectorAll('[inert]').length).toBeGreaterThan(0);
+    act(() => {
+      window.location.hash = '#/certificates'; // the browser's Back button
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(document.querySelector('[inert]')).toBeNull();
+  });
+});
+
 describe('Revoke dialog: focus and layout', () => {
   const drawer = () => screen.getByRole('dialog', { name: 'Certificate details' });
 
@@ -720,9 +909,8 @@ describe('Revoke dialog: focus and layout', () => {
     await user.click(screen.getByTestId('revoke-confirm'));
     expect(screen.getByTestId('revoke-confirm').disabled).toBe(true);
     // A browser takes the focus away from a button that gets disabled and leaves it on <body>,
-    // behind the dialog. The simulated DOM does not do that by itself, so the test moves it out.
-    screen.getByTestId('search-input').focus();
-    expect(confirmation().contains(document.activeElement)).toBe(false);
+    // behind the dialog.
+    dropFocusToBody();
 
     gate.resolve();
     await within(confirmation()).findByRole('alert');

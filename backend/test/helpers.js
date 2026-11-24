@@ -4,7 +4,7 @@
  * A second connection to the same file is used only to count rows (certificates, audit events).
  */
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
@@ -63,12 +63,13 @@ export function removeTempDir(dir) {
  * Runs a node entry point of the backend to completion: `{ code, output }` (stdout + stderr).
  * A process that is still running after `timeoutMs` is killed and reported with `code: null`.
  */
-function runNodeToExit(args, { env = {}, timeoutMs = 180_000 } = {}) {
+function runNodeToExit(args, { env = {}, timeoutMs = 180_000, spawnOptions = {} } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, {
       cwd: BACKEND_DIR,
-      env: { ...process.env, ...env },
+      env: { ...inheritedEnv(spawnOptions), ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
+      ...spawnOptions,
     });
     let output = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
@@ -83,6 +84,16 @@ function runNodeToExit(args, { env = {}, timeoutMs = 180_000 } = {}) {
       resolve({ code, output });
     });
   });
+}
+
+/**
+ * The environment a child process starts from. A process that runs as another user (see
+ * unprivilegedSpawnOptions) gets a clean one: what this process inherited - a home directory,
+ * certificate bundles, npm settings - points to places that user may not be able to read, and
+ * Node.js complains about some of them on stderr.
+ */
+function inheritedEnv(spawnOptions = {}) {
+  return spawnOptions.uid === undefined ? process.env : { PATH: process.env.PATH };
 }
 
 /** Runs a CLI script from backend/scripts and resolves with its combined output; rejects on a non-zero exit. */
@@ -116,12 +127,47 @@ const serverEnv = (dbPath, env) => ({
 const EXIT_WITH_PARENT = path.join('test', 'support', 'exit-with-parent.mjs');
 
 /** For start-ups that are expected to fail: runs `src/server.js` until it exits, `{ code, output }`. */
-export function runServerToExit(dbPath, { env = {} } = {}) {
-  return runNodeToExit([path.join('src', 'server.js')], { env: serverEnv(dbPath, env), timeoutMs: 20_000 });
+export function runServerToExit(dbPath, { env = {}, spawnOptions } = {}) {
+  return runNodeToExit([path.join('src', 'server.js')], { env: serverEnv(dbPath, env), timeoutMs: 20_000, spawnOptions });
 }
 
-/** Starts `src/server.js` on a free port and resolves once it accepts requests. */
-export function startServer(dbPath, { env = {} } = {}) {
+/**
+ * For tests about files the server may not write. The administrator may write every file, so a
+ * suite that runs as root (in a container, typically) has to start the server as somebody else:
+ * returns the spawn options for the system's unprivileged user ("nobody"), or null where there is
+ * none or it cannot run this project (no access to Node.js, to the sources or to `needs`).
+ * For any other user it returns {}: the server runs as the user of the suite.
+ */
+export function unprivilegedSpawnOptions(needs = []) {
+  if (process.getuid?.() !== 0) return {};
+  let entry;
+  try {
+    entry = fs.readFileSync('/etc/passwd', 'utf8').split('\n').map((line) => line.split(':')).find(([name]) => name === 'nobody');
+  } catch {
+    return null;
+  }
+  const [uid, gid] = [Number(entry?.[2]), Number(entry?.[3])];
+  if (!Number.isInteger(uid) || !Number.isInteger(gid) || uid === 0) return null;
+  const options = { uid, gid };
+  const readable = [path.join(BACKEND_DIR, 'src', 'server.js'), ...needs];
+  return readable.every((file) => canOpen(file, 'r', options)) ? options : null;
+}
+
+/** Whether a process started with `spawnOptions` (see above) can open `file` in the given mode ('r', 'r+'). */
+export function canOpen(file, mode, spawnOptions = {}) {
+  const probe = spawnSync(
+    process.execPath,
+    ['-e', 'const fs = require("node:fs"); fs.closeSync(fs.openSync(process.argv[1], process.argv[2]))', file, mode],
+    { ...spawnOptions, env: inheritedEnv(spawnOptions), cwd: BACKEND_DIR, stdio: 'ignore' },
+  );
+  return probe.status === 0;
+}
+
+/**
+ * Starts `src/server.js` on a free port and resolves once it accepts requests. `expectHost` is the
+ * host the start-up line is expected to name (serverEnv pins HOST to 127.0.0.1).
+ */
+export function startServer(dbPath, { env = {}, expectHost = '127.0.0.1' } = {}) {
   return new Promise((resolve, reject) => {
     // stdin is a pipe held by this process: see test/support/exit-with-parent.mjs.
     const child = spawn(process.execPath, ['--import', `./${EXIT_WITH_PARENT.replaceAll(path.sep, '/')}`, path.join('src', 'server.js')], {
@@ -143,12 +189,13 @@ export function startServer(dbPath, { env = {} } = {}) {
     }
     function onData(chunk) {
       output += chunk;
-      const match = output.match(/listening on (http:\/\/localhost:\d+)/);
+      // The server prints the address it can be reached at.
+      const match = output.match(new RegExp(`listening on (http://${expectHost.replaceAll('.', '\\.')}:\\d+)`));
       if (match && !settled) {
         settled = true;
         clearTimeout(timer);
         resolve({
-          baseUrl: match[1].replace('localhost', '127.0.0.1'),
+          baseUrl: match[1],
           output: () => output,
           stop: () =>
             new Promise((done) => {
