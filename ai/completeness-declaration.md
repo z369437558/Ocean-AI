@@ -51,14 +51,16 @@ tool, is the candidate's own statement, in the confirmations below.
    last time; committing and pushing it; one more privacy check of its newest part (lines 6843
    to 7284 and the two newest runs) by two sub-agents, run `wf_8eb472f6-4d3` - it found two commands of the
    preparation (lines 7065 and 7274) from which parts of withheld names could be worked out; both
-   are withheld in this export, which was built again up to the same last line;
-   making the repository public as the candidate asked; drafting the submission e-mail for the
-   candidate to send; and a closing summary. The two sessions of that last check began after the
+   are withheld in this export, which was built again up to the same last line; replacing the two
+   commits on GitHub, with the candidate's consent; an attempt to make the repository public as
+   the candidate had asked, which the session's access to GitHub does not permit - the candidate
+   changes the visibility; drafting the submission e-mail for the candidate to send; and a closing
+   summary. The two sessions of that last check began after the
    last exported line, so no exported file can hold them: they have a row each in
    `session-index.csv`, without a file. (For the same reason the commit that adds this directory
    cannot name itself: the commit after it writes its id into `session-index.csv`,
    `export/runs.json` and the overview `sessions/subagents/README.md`; both commits were made a second time after the last check, and replaced the first
-   pair.)
+   pair. A third commit corrected this paragraph: who makes the repository public.)
 9. **Two messages of the candidate reached the assistant hours late.** While the assistant was
    working, the candidate sent the official text of sections 2–5 of the assignment - the
    requirements for the application and for this evidence - and, later, the request to make the
