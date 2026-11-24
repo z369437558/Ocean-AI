@@ -382,12 +382,19 @@ function createDirectory(dir) {
   }
 }
 
-const mayWrite = (target) => {
+/**
+ * Whether this process is refused when it wants to write `target` (a file, or a directory to
+ * create files in). Only a refusal counts. A file that is not there is not in the way - and it may
+ * have been there a moment ago: SQLite removes the write-ahead log and its index when the last
+ * connection closes, which another process can be doing at this very moment.
+ */
+const WRITE_REFUSED = new Set(['EACCES', 'EPERM', 'EROFS']);
+const refusesWrites = (target) => {
   try {
     fs.accessSync(target, fs.constants.W_OK);
-    return true;
-  } catch {
     return false;
+  } catch (err) {
+    return WRITE_REFUSED.has(err.code);
   }
 };
 
@@ -404,15 +411,20 @@ const mayWrite = (target) => {
  * permissions do not show (a read-only volume, for instance).
  */
 function assertFilesWritable(file) {
-  if (!fs.existsSync(file)) return; // a new database: creating it is the test
-  const real = fs.realpathSync(file); // SQLite keeps the side files next to the file a link points to
+  let real; // SQLite keeps the side files next to the file a link points to
+  try {
+    real = fs.realpathSync(file);
+  } catch (err) {
+    if (err.code === 'ENOENT') return; // a new database: creating it is the test
+    throw err;
+  }
   const sideFiles = [`${real}-wal`, `${real}-shm`];
-  const readOnly = [real, ...sideFiles].find((existing) => fs.existsSync(existing) && !mayWrite(existing));
+  const readOnly = [real, ...sideFiles].find(refusesWrites);
   if (readOnly) {
     const what = readOnly === real ? 'the file' : `the file ${path.basename(readOnly)} next to it`;
     throw new Error(`the database cannot be written to (${what} is read-only for this user)`);
   }
-  if (!sideFiles.every((sideFile) => fs.existsSync(sideFile)) && !mayWrite(path.dirname(real))) {
+  if (!sideFiles.every((sideFile) => fs.existsSync(sideFile)) && refusesWrites(path.dirname(real))) {
     throw new Error(`the database cannot be written to (no file can be created next to it, in ${path.dirname(real)})`);
   }
 }

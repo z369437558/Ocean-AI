@@ -156,6 +156,17 @@ function makeRestInert(overlay) {
 }
 
 /**
+ * What the dialog that is leaving the page in the update that is running would have returned the
+ * focus to. A dialog that takes its place in the same update - the drawer of another certificate,
+ * after the address changed - finds the focus on <body>, because the old dialog is gone already,
+ * and takes this over instead. Set while such an update is applied, empty otherwise.
+ */
+let openerOfDialogLeaving = null;
+
+/** The dialogs on the page, bottom to top, without `panel`. */
+const dialogsBesides = (panel) => [...document.querySelectorAll('[role="dialog"]')].filter((dialog) => dialog !== panel);
+
+/**
  * Modal layer used for the certificate drawer and the revoke confirmation.
  *
  * - Escape and a click on the backdrop close it (unless `locked`, e.g. while a request is running).
@@ -178,7 +189,9 @@ export function Dialog({ title, onClose, locked = false, variant = 'modal', chil
   // dialog is gone already and the page would still refuse every key and click.
   useLayoutEffect(() => {
     const panel = panelRef.current;
-    openerRef.current = document.activeElement; // read first: becoming inert takes the focus away
+    const focused = document.activeElement; // read first: becoming inert takes the focus away
+    const nowhere = !focused || focused === document.body || !document.contains(focused);
+    openerRef.current = nowhere && openerOfDialogLeaving ? openerOfDialogLeaving : focused;
     const releaseRest = makeRestInert(panel.parentElement);
     panel.focus();
     const onKeyDown = (event) => {
@@ -196,6 +209,14 @@ export function Dialog({ title, onClose, locked = false, variant = 'modal', chil
     return () => {
       document.removeEventListener('keydown', onKeyDown);
       releaseRest();
+      openerOfDialogLeaving = openerRef.current;
+      // A dialog underneath that stays open takes the focus at once, when this one had it or it is
+      // nowhere (the browser takes it from a control that gets disabled). The effect below then
+      // moves it on to the element that opened this dialog, if that is still there - but there is
+      // no moment in which the focus sits on <body>, behind a dialog that is open.
+      const underneath = dialogsBesides(panel).at(-1);
+      const active = document.activeElement;
+      if (underneath && (!active || active === document.body || panel.contains(active))) underneath.focus();
     };
   }, []);
 
@@ -206,15 +227,15 @@ export function Dialog({ title, onClose, locked = false, variant = 'modal', chil
   useEffect(() => {
     const panel = panelRef.current;
     return () => {
+      openerOfDialogLeaving = null; // the update is complete: whoever took this dialog's place has it
       const opener = openerRef.current;
       if (opener instanceof HTMLElement && document.contains(opener)) {
-        opener.focus();
+        opener.focus(); // (does nothing when a dialog that replaced this one has made it inert)
         return;
       }
       // Without its opener the focus would drop to <body>, behind a dialog that is still open, and
       // the next Tab would start from there: hand it to the top-most remaining dialog instead.
-      const remaining = [...document.querySelectorAll('[role="dialog"]')].filter((dialog) => dialog !== panel);
-      remaining[remaining.length - 1]?.focus();
+      dialogsBesides(panel).at(-1)?.focus();
     };
   }, []);
 
@@ -222,7 +243,12 @@ export function Dialog({ title, onClose, locked = false, variant = 'modal', chil
     <div
       className={`overlay overlay-${variant}`}
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !locked) onClose();
+        if (event.target !== event.currentTarget) return;
+        // A press on the backdrop is not a press on something that takes the focus: left to the
+        // browser, it would move the focus to <body> - right after closing this dialog has handed
+        // it back to the button that opened it, or away from a dialog that is locked.
+        event.preventDefault();
+        if (!locked) onClose();
       }}
     >
       <div

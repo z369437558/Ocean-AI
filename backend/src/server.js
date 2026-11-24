@@ -64,7 +64,7 @@ server.listen(config.port, config.host, () => {
   console.log(`Certificate Admin Console listening on http://${reachableHost(config.host)}:${port}`);
   const actors = listActors(db).map((actor) => `${actor.email} (${actor.tenant.name})`);
   console.log(`Actors (${ACTOR_HEADER} header): ${actors.join(', ')}`);
-  if (!hasFrontend) console.log('Note: frontend build not found - serving the API only.');
+  if (!hasFrontend) console.log(`Note: no built UI (index.html) in ${config.staticDir} - serving the API only.`);
 });
 
 let shuttingDown = false;

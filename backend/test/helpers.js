@@ -118,13 +118,15 @@ export function runScriptToExit(script, args = [], options) {
 // developer's shell (HOST, DB_BUSY_TIMEOUT_MS, EXPORT_...) cannot change what the tests observe.
 // SQLITE_DRIVER alone is inherited, on purpose: the suite is meant to be run with either driver.
 // (test/support/pin-settings.mjs does the same for the test process itself.)
+/** Where the servers under test look for a built UI: nowhere, so they serve the API only. */
+export const NO_FRONTEND_DIR = path.join(BACKEND_DIR, 'no-frontend');
 const serverEnv = (dbPath, env) => ({
   PORT: '0',
   HOST: '127.0.0.1',
   DB_PATH: dbPath,
   DB_BUSY_TIMEOUT_MS: '',
   LOG_REQUESTS: '0',
-  STATIC_DIR: path.join(BACKEND_DIR, 'no-frontend'),
+  STATIC_DIR: NO_FRONTEND_DIR,
   EXPORT_MAX_CONCURRENT: '',
   EXPORT_IDLE_TIMEOUT_MS: '',
   ...env,
@@ -172,6 +174,24 @@ export function launcherBoundByPermissions({ mustRead = [], mustNotWrite }) {
     }
   }
   return { unavailable: refused.join('; ') };
+}
+
+/**
+ * Whether file permissions apply to the running process `pid`: it is not root, or it is root
+ * without the capability to ignore them. Read from /proc; null where there is no such thing.
+ */
+export function permissionsApplyTo(pid) {
+  let status;
+  try {
+    status = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+  } catch {
+    return null;
+  }
+  const effectiveUid = /^Uid:\s+\d+\s+(\d+)/m.exec(status)?.[1];
+  const effectiveCapabilities = /^CapEff:\s+([0-9a-f]+)/m.exec(status)?.[1];
+  if (effectiveUid === undefined || effectiveCapabilities === undefined) return null;
+  const CAP_DAC_OVERRIDE = 1n << 1n;
+  return effectiveUid !== '0' || (BigInt(`0x${effectiveCapabilities}`) & CAP_DAC_OVERRIDE) === 0n;
 }
 
 /** uid and gid of the user "nobody", or null where the system has none. */
@@ -241,6 +261,7 @@ export function startServer(dbPath, { env = {}, expectHost = '127.0.0.1', launch
         clearTimeout(timer);
         resolve({
           baseUrl: match[1],
+          pid: child.pid,
           output: () => output,
           stop: () =>
             new Promise((done) => {

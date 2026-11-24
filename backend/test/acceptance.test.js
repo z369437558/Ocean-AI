@@ -22,6 +22,7 @@ import { issueCertificate } from '../src/services/ledger.js';
 import {
   ALICE,
   BOB,
+  NO_FRONTEND_DIR,
   SEED,
   assertSameRows,
   clientFor,
@@ -34,6 +35,7 @@ import {
   launcherBoundByPermissions,
   openStream,
   parseCsv,
+  permissionsApplyTo,
   referenceFold,
   removeTempDir,
   runScript,
@@ -2421,11 +2423,16 @@ describe('start-up and maintenance commands', () => {
         t.skip(`no way here to start a server that the permissions of a file apply to: ${launcher.unavailable}`);
         return;
       }
-      const refused = async (reason) => {
-        const { code, output } = await runServerToExit(dbPath, { launcher });
+      const refused = async (reason, file = dbPath) => {
+        const { code, output } = await runServerToExit(file, { launcher });
         assert.equal(code, 1, output);
         assert.equal(output.trim().split('\n').length, 1, output);
-        assert.ok(output.startsWith(`Could not open the database at ${dbPath}: the database cannot be written to (${reason})`), output);
+        assert.ok(output.startsWith(`Could not open the database at ${file}: the database cannot be written to (${reason})`), output);
+        // The command that restores the demo data gives the same reason - and no advice to delete
+        // files: a database that may not be written is not a damaged one.
+        const reset = await runScriptToExit('init-db.js', ['--reset', '--db', file], { launcher });
+        assert.equal(reset.code, 1, reset.output);
+        assert.equal(reset.output.trim(), `Reset failed, nothing was changed: the database cannot be written to (${reason})`);
       };
 
       await refused('the file is read-only for this user');
@@ -2436,24 +2443,62 @@ describe('start-up and maintenance commands', () => {
       // Such a left-over - from another program, or an earlier version of this one - keeps the
       // database read-only whatever the permissions of the file itself: the message names it.
       fs.chmodSync(dbPath, 0o666);
-      const leftOver = `${dbPath}-shm`;
-      fs.writeFileSync(leftOver, Buffer.alloc(32768));
-      fs.chmodSync(leftOver, 0o444);
-      await refused('the file read-only.sqlite-shm next to it is read-only for this user');
-      fs.rmSync(leftOver);
+      for (const suffix of ['-shm', '-wal']) {
+        const leftOver = `${dbPath}${suffix}`;
+        fs.writeFileSync(leftOver, Buffer.alloc(32768));
+        fs.chmodSync(leftOver, 0o444);
+        await refused(`the file read-only.sqlite${suffix} next to it is read-only for this user`);
+        fs.rmSync(leftOver);
+      }
 
       // A file that may be written in a directory that may not: the log could not be created.
+      const elsewhere = createTempDir('cert-admin-link-');
       fs.chmodSync(shared, 0o555);
       try {
         await refused(`no file can be created next to it, in ${shared}`);
+        // Reached through a link from a directory that takes new files, it is the same database:
+        // SQLite keeps the log next to the file itself, wherever the link is.
+        fs.chmodSync(elsewhere, 0o777);
+        const link = path.join(elsewhere, 'link.sqlite');
+        fs.symlinkSync(dbPath, link);
+        await refused(`no file can be created next to it, in ${shared}`, link);
+        assert.deepEqual(fs.readdirSync(elsewhere), ['link.sqlite']);
+        // One of the two side files in place is not enough: the other one is still to be created.
+        fs.chmodSync(shared, 0o777);
+        fs.writeFileSync(`${dbPath}-wal`, '');
+        fs.chmodSync(`${dbPath}-wal`, 0o666);
+        fs.chmodSync(shared, 0o555);
+        await refused(`no file can be created next to it, in ${shared}`);
       } finally {
         fs.chmodSync(shared, 0o777);
+        fs.rmSync(`${dbPath}-wal`, { force: true });
+        removeTempDir(elsewhere);
       }
       assert.deepEqual(fs.readdirSync(shared), ['read-only.sqlite']);
+
+      // With both side files in place nothing is left to create: a database that another process
+      // has open starts in a directory that takes no new files.
+      const holder = await startServer(dbPath);
+      fs.chmodSync(shared, 0o555);
+      try {
+        assert.deepEqual(fs.readdirSync(shared), ['read-only.sqlite', 'read-only.sqlite-shm', 'read-only.sqlite-wal']);
+        const second = await startServer(dbPath, { launcher });
+        try {
+          // (The server that started is one the permissions apply to, like the ones refused above.)
+          assert.notEqual(permissionsApplyTo(second.pid), false);
+          assert.equal((await clientFor(second.baseUrl, ALICE).get('/api/certificates')).json.total, SEED.east.certificateCount);
+        } finally {
+          await second.stop();
+        }
+      } finally {
+        fs.chmodSync(shared, 0o777);
+        await holder.stop();
+      }
 
       // With the permissions put right the same file starts, with everything in it.
       const server = await startServer(dbPath, { launcher });
       try {
+        assert.notEqual(permissionsApplyTo(server.pid), false);
         const list = await clientFor(server.baseUrl, ALICE).get('/api/certificates');
         assert.equal(list.json.total, SEED.east.certificateCount);
       } finally {
@@ -2467,6 +2512,49 @@ describe('start-up and maintenance commands', () => {
       }
     } finally {
       removeTempDir(shared);
+    }
+  });
+
+  it('without a built UI the server says where it looked for one and serves the API only', async () => {
+    const dbPath = path.join(dir, 'api-only.sqlite');
+    const server = await startServer(dbPath); // STATIC_DIR names a directory that does not exist
+    try {
+      const note = `Note: no built UI (index.html) in ${NO_FRONTEND_DIR} - serving the API only.`;
+      await until(() => server.output().includes(note), { label: `the note in:\n${server.output()}` });
+      // The page says what is missing and what the setting has to be - not "run npm start", which
+      // changes nothing for somebody whose STATIC_DIR has a typo.
+      const page = await fetch(`${server.baseUrl}/`);
+      assert.equal(page.status, 200);
+      assert.match(await page.text(), /no built UI to serve.*npm start.*frontend\/dist.*STATIC_DIR.*has to name the directory with the built UI/s);
+      assert.equal((await clientFor(server.baseUrl, ALICE).get('/api/me')).status, 200);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('serves the built UI, also from a directory whose path has a hidden directory in it', async () => {
+    // A checkout below ~/.local or ~/.config, say. Only the name of the file itself matters.
+    const built = path.join(dir, '.hidden', 'dist');
+    fs.mkdirSync(path.join(built, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(built, 'index.html'), '<!doctype html><title>the built page</title>');
+    fs.writeFileSync(path.join(built, 'assets', 'app.js'), 'console.log("built")');
+    const server = await startServer(path.join(dir, 'with-ui.sqlite'), { env: { STATIC_DIR: built } });
+    try {
+      assert.doesNotMatch(server.output(), /no built UI/);
+      for (const page of ['/', '/certificates/3', '/anything/else']) {
+        const response = await fetch(`${server.baseUrl}${page}`);
+        assert.equal(response.status, 200, page);
+        assert.match(response.headers.get('content-type'), /^text\/html/, page);
+        assert.match(await response.text(), /the built page/, page);
+      }
+      const asset = await fetch(`${server.baseUrl}/assets/app.js`);
+      assert.equal(asset.status, 200);
+      assert.equal(await asset.text(), 'console.log("built")');
+      // A missing asset stays a 404; it does not turn into the page.
+      assert.equal((await fetch(`${server.baseUrl}/assets/missing.js`)).status, 404);
+      assert.equal((await clientFor(server.baseUrl, ALICE).get('/api/me')).status, 200);
+    } finally {
+      await server.stop();
     }
   });
 

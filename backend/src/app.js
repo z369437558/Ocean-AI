@@ -317,13 +317,19 @@ export function createApp({
       const isPageRequest = (req.method === 'GET' || req.method === 'HEAD') && !path.extname(req.path);
       if (!isPageRequest) return next(); // a missing asset stays a 404 instead of becoming HTML
       res.set('Cache-Control', 'no-cache');
-      return res.sendFile(indexHtml);
+      // Relative to its directory: given the full path, Express would refuse the file wherever a
+      // directory above it has a name that starts with a dot (a checkout below ~/.local, say).
+      return res.sendFile('index.html', { root: staticDir });
     });
   } else {
     app.get('/', (_req, res) => {
       res
         .type('text/plain')
-        .send('The API is running, but the frontend has not been built yet. Run "npm start" from the repository root.\n');
+        .send(
+          'The API is running, but this server has no built UI to serve. "npm start" from the repository root builds it ' +
+            'into frontend/dist; if STATIC_DIR is set, it has to name the directory with the built UI. ' +
+            "(The server's start-up output names the directory it looked in.)\n",
+        );
     });
   }
 

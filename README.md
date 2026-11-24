@@ -40,8 +40,8 @@ with the demo data (first run only) and starts the whole app on **http://localho
 npm test
 ```
 
-Runs the verification suite: 191 API tests covering acceptance criteria A1–A7, including the
-100,000-row export checks, followed by 253 UI tests of the four workflows. It uses throw-away
+Runs the verification suite: 193 API tests covering acceptance criteria A1–A7, including the
+100,000-row export checks, followed by 257 UI tests of the four workflows. It uses throw-away
 databases in the OS temp directory and never touches the app's data. Takes about a minute. (One
 API test needs a file the server may read but not write. Root may write every file, so when the
 suite runs as root - in a container, say - that test starts its server without that one privilege
@@ -68,8 +68,10 @@ cannot be used is reported in one line and nothing starts: the settings are chec
 the port is claimed, and only then is the database opened (or created) - a start that fails on a
 setting or on the port does not leave a database file behind. A database that cannot be written
 to (a read-only file or directory) is refused at that point as well, not at the first write, and
-is left exactly as it was found. The line printed after a successful start names the address to
-open: `localhost` when the server listens on all interfaces, the configured `HOST` otherwise.
+is left exactly as it was found. The one setting that is not refused is a `STATIC_DIR` without a
+built UI in it: the server says in its start-up output where it looked and serves the API only
+(this is how `npm run dev` runs it). The line printed after a successful start names the address
+to open: `localhost` when the server listens on all interfaces, the configured `HOST` otherwise.
 
 | Variable                 | Default                  | Meaning |
 | ------------------------ | ------------------------ | ------- |
@@ -301,9 +303,10 @@ quoting, `\n` line endings. Cells that would be interpreted as spreadsheet formu
 ### Reproducing A1–A7 by hand
 
 `npm test` checks all of this automatically. The steps below show each criterion on the running
-app instead: start it as in section 1, then use a second terminal (POSIX shell with `curl`;
-`node` prints one JSON answer readably). They begin with the quick-start data and are meant to be
-run in this order - A3 and A4 use the answers of A2.
+app instead: start it as in section 1, then use a second terminal **in the project directory**
+(POSIX shell with `curl`; `node` prints one JSON answer readably). They begin with the quick-start
+data and are meant to be run in this order - A3 and A4 use the answers of A2, which are kept in
+`/tmp` until the last step removes them.
 
 ```bash
 npm run db:reset
@@ -316,13 +319,17 @@ URL=http://localhost:3000; J='Content-Type: application/json'
 ```bash
 curl -s -H "$A" "$URL/api/certificates" | grep -o '"serialNumber":"[A-Z]*' | sort | uniq -c   # 7 x EAST
 curl -s -H "$B" "$URL/api/certificates" | grep -o '"serialNumber":"[A-Z]*' | sort | uniq -c   # 4 x WEST
+curl -s -H "$B" "$URL/api/certificates/export.csv" | grep -oE '(EAST|WEST)-[0-9]+' | cut -d- -f1 | sort | uniq -c   # the export: 4 x WEST
 curl -s -w ' -> %{http_code}\n' -H "$B" "$URL/api/certificates/1"        # East's certificate as West: 404 ...
 curl -s -w ' -> %{http_code}\n' -H "$B" "$URL/api/certificates/999999"   # ... word for word the answer for an id that does not exist
 curl -s -w ' -> %{http_code}\n' -X POST -H "$B" -H "$J" -H 'Idempotency-Key: a1' \
      -d '{"courseId": 1}' "$URL/api/bulk-issues"                          # East's course as West: 404 "Course not found"
 curl -s -H "$A" "$URL/api/certificates?pageSize=1" | grep -o '"total":[0-9]*'   # East still has 7 certificates,
 curl -s -H "$A" "$URL/api/audit-events"            | grep -o '"total":[0-9]*'   # 8 audit events
-curl -s -H "$A" "$URL/api/bulk-issues"                                          # and no operation: {"items":[]}
+curl -s -H "$A" "$URL/api/bulk-issues"; echo                                    # and no operation: {"items":[]}
+curl -s -H "$B" "$URL/api/certificates?pageSize=1" | grep -o '"total":[0-9]*'   # nothing was written on West's side either:
+curl -s -H "$B" "$URL/api/audit-events"            | grep -o '"total":[0-9]*'   # still 4 certificates and 5 audit events,
+curl -s -H "$B" "$URL/api/bulk-issues"; echo                                    # and no operation: {"items":[]}
 ```
 
 In the UI: act as Bob and open `http://localhost:3000/#/certificates/1` - *Certificate not found*.
@@ -335,9 +342,11 @@ for i in 1 2 3; do            # sequential: executed once, then the stored answe
     | grep -iE '^HTTP|^idempotent-replayed'
 done                          # 201 + "Idempotent-Replayed: false", then twice 201 + "true"
 
+rm -f /tmp/a2-*.json
 seq 20 | xargs -P 20 -I{} curl -s -X POST -H "$A" -H "$J" -H 'Idempotency-Key: demo-par' \
      -d '{"courseId": 1}' "$URL/api/bulk-issues" -o /tmp/a2-{}.json        # 20 requests at once, one key
-sort -u /tmp/a2-*.json | wc -l                                                    # 1: all twenty answers are the same
+find /tmp -maxdepth 1 -name 'a2-*.json' -size +0 | wc -l                          # 20: every request was answered,
+sort -u /tmp/a2-*.json | wc -l                                                    # 1: and all twenty answers are the same
 curl -s -H "$A" "$URL/api/bulk-issues" | grep -o '"id":[0-9]*,"status"' | wc -l   # 2 operations, one per key
 curl -s -H "$A" "$URL/api/certificates?pageSize=1" | grep -o '"total":[0-9]*'     # 10 certificates: 7 + 1 + 2
 curl -s -H "$A" "$URL/api/audit-events?action=certificate.issued" | grep -o '"total":[0-9]*'   # 10: one issue event each
@@ -375,8 +384,18 @@ failures*). The Bulk issue page shows the same outcomes, with the reasons in wor
 ```bash
 curl -s -H "$A" "$URL/api/certificates/1" | grep -o '"issuedAt":"[^"]*","issuedLocal":"[^"]*"'   # 2026-01-10T13:30:00.000Z -> 2026-01-11 00:30
 curl -s -H "$B" "$URL/api/certificates/8" | grep -o '"issuedAt":"[^"]*","issuedLocal":"[^"]*"'   # the same instant -> 2026-01-10 21:30
-curl -s -H "$A" "$URL/api/certificates/export.csv?sort=issued&order=asc" | head -3   # ordered and printed by the Sydney date
-curl -s -H "$B" "$URL/api/certificates/export.csv?sort=issued&order=asc" | head -3   # ... and by the Perth date
+curl -s -H "$A" "$URL/api/certificates/export.csv?sort=issued&order=asc" | head -3   # the CSV prints Sydney time
+curl -s -H "$B" "$URL/api/certificates/export.csv?sort=issued&order=asc" | head -3   # ... and Perth time
+```
+
+These lines show the conversion, not the ordering rule: the quick-start rows of a tenant come out
+in the same order whether they are sorted by the local calendar date or by the UTC date. The case
+that tells the two apart - two certificates issued on the same UTC day that fall on different
+Sydney days, the later one with the lower id - is built and checked, for the list and for the
+CSV, by one test of the suite:
+
+```bash
+(cd backend && node --test --test-reporter=spec --test-name-pattern='tenant-local calendar date' test/acceptance.test.js)
 ```
 
 **A6 – 100,000 certificates.**
@@ -404,8 +423,10 @@ npm run generate:east -- --clear                # back to the quick-start certif
 **A7 – revocation and its audit event.**
 
 ```bash
+curl -s -H "$A" "$URL/api/certificates/3" | grep -o '"status":"[a-z]*"' | head -1   # "status":"active"
 curl -s -X POST -H "$A" -H "$J" -d '{"reason":"Issued in error"}' "$URL/api/certificates/3/revoke" \
   | grep -o '"alreadyRevoked":[a-z]*'                                              # false: revoked by this request
+curl -s -H "$A" "$URL/api/certificates/3" | grep -o '"status":"[a-z]*"' | head -1   # "status":"revoked"
 curl -s -X POST -H "$A" "$URL/api/certificates/3/revoke" | grep -o '"alreadyRevoked":[a-z]*'   # true: nothing changes
 curl -s -H "$A" "$URL/api/audit-events?certificateId=3" | grep -o '"action":"[a-z.]*"' | sort | uniq -c
 #   1 "action":"certificate.issued"
@@ -413,7 +434,12 @@ curl -s -H "$A" "$URL/api/audit-events?certificateId=3" | grep -o '"action":"[a-
 ```
 
 In the UI: open a certificate, *Revoke certificate…*, confirm; the audit trail in the drawer shows
-the new event. `npm run db:reset` restores the quick-start data afterwards.
+the new event.
+
+```bash
+rm -f /tmp/a2-*.json /tmp/e1.csv /tmp/e2.csv   # the files these steps wrote
+npm run db:reset                               # the quick-start data again
+```
 
 ### How the UI side and the numbers are covered
 
@@ -651,8 +677,13 @@ docs/screenshots/          the images used in this README
   for five minutes is treated as gone (see *Export without blocking* in section 7).
 - *Idempotency keys are kept for ever.* Nothing expires them, so the table grows by one row per
   bulk issue.
-- *After a refused `npm run db:reset` on a read-only database* the message ends with a hint about
-  damaged files that does not apply to that case.
+- *A SIGTERM to the `npm` process does not stop the app.* `npm start` and `npm run dev` are meant
+  to be stopped with Ctrl+C, which reaches every process they started. `kill <pid of npm>` ends
+  npm alone: the shell npm runs its scripts in does not pass the signal on, and the server keeps
+  running. Signal the process group, or the `node` process itself.
+- *In `npm run dev` the API does not come back by itself after a syntax error has been fixed.*
+  Node's watch mode stops watching a file that failed to load: save any other file of the backend,
+  or restart the command.
 
 **Not verified** - I have no evidence either way:
 
@@ -684,7 +715,7 @@ docs/screenshots/          the images used in this README
 ## 中文速览
 
 - **启动**：`npm start`（自动安装依赖、构建前端、初始化演示数据并启动，访问 http://localhost:3000）
-- **验证测试**：`npm test`（接口测试 191 项，覆盖验收标准 A1–A7，含 10 万行导出；界面测试 253 项；约 1 分钟）
+- **验证测试**：`npm test`（接口测试 193 项，覆盖验收标准 A1–A7，含 10 万行导出；界面测试 257 项；约 1 分钟）
 - **生成 10 万条 East 证书**：`npm run generate:east`（不改动默认演示数据；`-- --clear` 可清除）
 - **恢复演示数据**：`npm run db:reset`（服务运行中也可执行）
 - **切换操作者**：页面右上角 *Acting as*，或在请求中带 `X-Actor-Email: alice@east.test` / `bob@west.test`

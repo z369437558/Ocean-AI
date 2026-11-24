@@ -737,6 +737,47 @@ describe('Dialogs are modal: only the top-most one can be operated', () => {
     await expectFocusOn(() => link); // the keyboard continues where it left the list
   });
 
+  it('returns the focus to that link also when the address moved on to another certificate while the drawer was open', async () => {
+    const { user } = openConsole();
+    await loadedRows();
+    const link = screen.getByRole('link', { name: 'EAST-0000003' });
+    await user.click(link);
+    await detailLoaded();
+    act(() => {
+      window.location.hash = '#/certificates/4'; // an edited address, a pasted link, the Forward button
+    });
+    await waitFor(() => expect(screen.getByTestId('detail-serial').textContent).toBe('EAST-0000004'));
+    // One drawer has taken the place of the other. The new one opened with the focus nowhere - the
+    // old one was gone - and still knows where the keyboard came from.
+    await expectFocusOn(drawer);
+    expect(inert(link)).toBe(true);
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await expectFocusOn(() => link);
+  });
+
+  it('does not send the focus to the link of an earlier drawer when a later one opened with the focus nowhere', async () => {
+    const { user } = openConsole();
+    await loadedRows();
+    const link = screen.getByRole('link', { name: 'EAST-0000003' });
+    await user.click(link);
+    await detailLoaded();
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await expectFocusOn(() => link);
+
+    dropFocusToBody(); // a click on an empty part of the page
+    act(() => {
+      window.location.hash = '#/certificates/4'; // a pasted link: nothing on the page opened this drawer
+    });
+    await waitFor(() => expect(screen.getByTestId('detail-serial').textContent).toBe('EAST-0000004'));
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await settle();
+    expect(document.activeElement).toBe(document.body); // where it was - not the link of the drawer before
+  });
+
   it('keeps Tab inside the confirmation; the drawer underneath is out of reach until it closes', async () => {
     const { user } = await openRevokeConfirmation();
     const dialog = confirmation();
@@ -874,10 +915,45 @@ describe('Revoke dialog: focus and layout', () => {
     await expectFocusOn(drawer); // not <body>, from where the next Tab would leave the drawer
   });
 
+  it('has the focus in the drawer in the very step in which the dialog goes, not a moment later', async () => {
+    const { user } = await openRevokeConfirmation();
+    // Where is the focus at the moment the confirmation leaves the page?
+    const focusWhenDialogLeft = [];
+    const watcher = new MutationObserver((records) => {
+      const dialogsRemoved = records.flatMap((record) => [...record.removedNodes]).filter((node) => node.nodeType === 1 && node.querySelector('[role="dialog"]'));
+      if (dialogsRemoved.length > 0) focusWhenDialogLeft.push(document.activeElement);
+    });
+    watcher.observe(document.body, { childList: true, subtree: true });
+    try {
+      await user.click(screen.getByTestId('revoke-confirm'));
+      await screen.findByTestId('revoke-result');
+      await waitFor(() => expect(queryConfirmation()).toBeNull());
+    } finally {
+      watcher.disconnect();
+    }
+    // Not <body>, behind the drawer that is still open - not even until the next effect has run.
+    expect(focusWhenDialogLeft.length).toBe(1);
+    expect(focusWhenDialogLeft[0]).toBe(drawer());
+  });
+
   it('returns the focus to the Revoke button when the dialog is cancelled', async () => {
     const { user } = await openRevokeConfirmation();
     await user.keyboard('{Escape}');
     expect(document.activeElement).toBe(screen.getByTestId('revoke-button'));
+  });
+
+  it('returns the focus to the Revoke button when the dialog is closed through its backdrop, and keeps the press from taking it away', async () => {
+    await openRevokeConfirmation();
+    // Left to the browser, a press on the backdrop moves the focus to <body> - after the closing
+    // dialog has handed it back. `false`: the dialog has taken the press, the browser does nothing.
+    const leftToTheBrowser = fireEvent.mouseDown(confirmation().parentElement);
+    expect(queryConfirmation()).toBeNull();
+    expect(leftToTheBrowser).toBe(false);
+    await expectFocusOn(() => screen.getByTestId('revoke-button'));
+
+    // A press inside a dialog is an ordinary press: it reaches the control it lands on.
+    expect(fireEvent.mouseDown(screen.getByTestId('revoke-button'))).toBe(true);
+    expect(screen.getByRole('dialog', { name: 'Certificate details' })).toBeTruthy();
   });
 
   it('returns the focus to the Revoke button also when a reload behind the dialog has replaced it', async () => {

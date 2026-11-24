@@ -103,7 +103,11 @@ if (values.reset && fs.existsSync(dbPath)) {
       console.error('The database is busy (another process is writing to it). Nothing was changed; try again in a moment.');
     } else {
       console.error(`Reset failed, nothing was changed: ${err.message}`);
-      console.error(`If the file is damaged, stop the server and delete ${dbPath}* to start over.`);
+      // A database that may not be written is not damaged: its files are to be made writable, not
+      // deleted (a write-ahead log next to it can hold data).
+      if (!/^the database cannot be written to\b/.test(err.message)) {
+        console.error(`If the file is damaged, stop the server and delete ${dbPath}* to start over.`);
+      }
     }
     process.exit(1);
   }

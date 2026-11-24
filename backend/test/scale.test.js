@@ -282,26 +282,39 @@ describe('A6 - 100,000-certificate export', { timeout: 300_000 }, () => {
       { query: 'q=Alex%20Lee&sort=course&order=desc', rows: 1 },
       { query: 'q=east-lt-0099999&status=active&sort=issued', rows: null },
     ]) {
-      let running = true;
-      const exported = timed(() => alice.get(`/api/certificates/export.csv?${query}`)).finally(() => {
-        running = false;
-      });
-      const latencies = [];
-      while (running) {
-        const { value, ms } = await timed(() => alice.get('/api/certificates?pageSize=25'));
+      const measure = async () => {
+        let running = true;
+        const exported = timed(() => alice.get(`/api/certificates/export.csv?${query}`)).finally(() => {
+          running = false;
+        });
+        const latencies = [];
+        while (running) {
+          const { value, ms } = await timed(() => alice.get('/api/certificates?pageSize=25'));
+          assert.equal(value.status, 200);
+          if (running) latencies.push(ms); // started and finished while the export was at work
+        }
+        const { value, ms } = await exported;
         assert.equal(value.status, 200);
-        if (running) latencies.push(ms); // started and finished while the export was at work
+        const exportedRows = parseCsv(value.text).length - 1;
+        if (rows !== null) assert.equal(exportedRows, rows, query);
+        assert.ok(exportedRows <= 1, query);
+        return { ms, exportedRows, latencies, worst: Math.max(0, ...latencies) };
+      };
+      // Such an export takes a fraction of a second. A server it keeps busy lets one request
+      // through in that time, or none - on every try. Fewer than ten, on the other hand, can also
+      // mean that the machine was busy with something else at that moment, so the measurement is
+      // repeated before it counts: a busy machine gets its ten on another try, a blocked server never.
+      let result;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        result = await measure();
+        t.diagnostic(
+          `${query}: export ${result.ms.toFixed(0)} ms for ${result.exportedRows} row(s); ${result.latencies.length} list requests answered meanwhile, ` +
+            `slowest ${result.worst.toFixed(0)} ms${attempt > 1 ? ` (try ${attempt})` : ''}`,
+        );
+        if (result.latencies.length >= 10) break;
       }
-      const { value, ms } = await exported;
-      assert.equal(value.status, 200);
-      const exportedRows = parseCsv(value.text).length - 1;
-      if (rows !== null) assert.equal(exportedRows, rows, query);
-      assert.ok(exportedRows <= 1, query);
-
-      const worst = Math.max(0, ...latencies);
-      t.diagnostic(`${query}: export ${ms.toFixed(0)} ms for ${exportedRows} row(s); ${latencies.length} list requests answered meanwhile, slowest ${worst.toFixed(0)} ms`);
-      assert.ok(latencies.length >= 10, `${query}: only ${latencies.length} list requests were answered during the ${ms.toFixed(0)} ms export`);
-      assert.ok(worst < 1_000, `${query}: slowest concurrent list request took ${worst.toFixed(0)} ms`);
+      assert.ok(result.latencies.length >= 10, `${query}: only ${result.latencies.length} list requests were answered during the ${result.ms.toFixed(0)} ms export, on each of three tries`);
+      assert.ok(result.worst < 1_000, `${query}: slowest concurrent list request took ${result.worst.toFixed(0)} ms`);
     }
   });
 
