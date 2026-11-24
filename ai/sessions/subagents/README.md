@@ -47,7 +47,7 @@ Second review of this evidence directory, after it had been rebuilt with the cha
 
 Task given to the run: Second independent review of the rebuilt ai/ evidence directory after the fixes: privacy, fidelity and facts
 
-Related commits: —
+Related commits: fdc340c
 
 | sub-agent | label | model | started (UTC) | ended (UTC) | tool calls | outcome |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -85,7 +85,7 @@ Third and last review of this evidence directory before it was committed: a priv
 
 Task given to the run: Last independent check of the staged ai/ evidence directory before it is published: privacy (with the source), an outsider reading, and the facts in the documents
 
-Related commits: —
+Related commits: fdc340c
 
 | sub-agent | label | model | started (UTC) | ended (UTC) | tool calls | outcome |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -101,7 +101,7 @@ Check of the finished application against the official wording of sections 2 to 
 
 Task given to the run: Check the finished application against the official wording of sections 2 to 4 of the assignment, as the company's evaluator would: sentence by sentence, from a clean clone
 
-Related commits: 7ea0f6f
+Related commits: 7ea0f6f fdc340c
 
 | sub-agent | label | model | started (UTC) | ended (UTC) | tool calls | outcome |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -151,7 +151,7 @@ Review of this evidence directory before it was committed: privacy of the export
 
 Task given to the run: Independent review of the staged ai/ evidence directory: privacy, fidelity of the export, facts in the documents, and compliance with section 5 of the assignment
 
-Related commits: —
+Related commits: fdc340c
 
 | sub-agent | label | model | started (UTC) | ended (UTC) | tool calls | outcome |
 | --- | --- | --- | --- | --- | --- | --- |

@@ -11,7 +11,7 @@
   "c706d93",
   "22fe305",
   "7ea0f6f",
-  ""
+  "fdc340c"
  ],
  "runs": {
   "wf_956299a7-a24": {
@@ -61,26 +61,26 @@
   "wf_ce880d66-b3c": {
    "purpose": "Review of this evidence directory before it was committed: privacy of the exported files, fidelity of the export, the facts stated in the documents, the view of an evaluator, and a critic.",
    "commits": [
-    ""
+    "fdc340c"
    ]
   },
   "wf_64f4f895-96e": {
    "purpose": "Second review of this evidence directory, after it had been rebuilt with the changes the first review led to: privacy, fidelity of the export, facts and requirements.",
    "commits": [
-    ""
+    "fdc340c"
    ]
   },
   "wf_9ebd21af-0fe": {
    "purpose": "Third and last review of this evidence directory before it was committed: a privacy check against the tool's files, a reading by a session that was given only the files to be published, and a check of the facts stated in the documents.",
    "commits": [
-    ""
+    "fdc340c"
    ]
   },
   "wf_be7a6b64-0c4": {
    "purpose": "Check of the finished application against the official wording of sections 2 to 4 of the assignment, which had reached the session late: two sub-agents acting as the company's evaluators, each from a clean clone - constraints and product scope in a browser; demo data and scenarios A1 to A7 by the README's steps and by checks of their own.",
    "commits": [
     "7ea0f6f",
-    ""
+    "fdc340c"
    ]
   }
  },
@@ -95,7 +95,7 @@
    "ended_at": "2026-11-24T11:37:46.288Z",
    "purpose": "check:outsider: last privacy check of the newest part of this evidence directory (lines 6843 to 7284 and the two newest runs) before the repository was made public. Started after the last exported line.",
    "commits": [
-    ""
+    "fdc340c"
    ]
   },
   {
@@ -106,7 +106,7 @@
    "ended_at": "2026-11-24T11:43:21.384Z",
    "purpose": "check:privacy: last privacy check of the newest part of this evidence directory (lines 6843 to 7284 and the two newest runs) before the repository was made public. Started after the last exported line.",
    "commits": [
-    ""
+    "fdc340c"
    ]
   }
  ]
