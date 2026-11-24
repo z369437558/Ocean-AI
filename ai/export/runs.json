@@ -1,0 +1,113 @@
+{
+ "main_tool": "Claude Code (cloud session at claude.ai/code, session_01N8a9P4ffov11BZN7rrXK3k)",
+ "subagent_tool": "Claude Code sub-agent started by the main session through its Workflow tool",
+ "main_purpose": "The whole assignment in one interactive session: planning, implementation, verification rounds, fixes, README, git history, this evidence. (The same session also holds one unrelated request, withheld; see ai/README.md.)",
+ "main_commits": [
+  "9c2d538",
+  "4a88be6",
+  "56ed60e",
+  "5f34d63",
+  "f615919",
+  "c706d93",
+  "22fe305",
+  "7ea0f6f",
+  ""
+ ],
+ "runs": {
+  "wf_956299a7-a24": {
+   "purpose": "Audit round 1: nine independent read-only auditors, one per risk area, checking the first complete version against the specification. Seven of the nine were cut off by a usage limit; two returned results.",
+   "commits": [
+    "56ed60e"
+   ]
+  },
+  "wf_e4b5cf66-7b5": {
+   "purpose": "Audit round 2: the seven areas that had not run, plus a review of the fixes made after round 1.",
+   "commits": [
+    "5f34d63",
+    "f615919"
+   ]
+  },
+  "wf_cf2a82ec-f18": {
+   "purpose": "Rework of the UI after the audit findings: one sub-agent implemented the fixes and a UI test suite, others verified it in a browser and by review, repaired what they found and confirmed the repair.",
+   "commits": [
+    "f615919",
+    "c706d93"
+   ]
+  },
+  "wf_c39bd866-324": {
+   "purpose": "Independent verification of the backend fixes of audit round 2 (export, search and data, write path, code review).",
+   "commits": [
+    "f615919"
+   ]
+  },
+  "wf_c7cfad2a-83b": {
+   "purpose": "Verification round 3 on the whole application: acceptance criteria, adversarial backend tests, real-browser checks, installation and documentation, quality of the tests.",
+   "commits": [
+    "c706d93"
+   ]
+  },
+  "wf_2de7e29c-a07": {
+   "purpose": "Verification round 4 on the whole application after the round-3 fixes, with a completeness critic.",
+   "commits": [
+    "22fe305"
+   ]
+  },
+  "wf_36b67f7f-878": {
+   "purpose": "Confirmation of the changes made after round 4: dialog handling in the UI, the database pre-check and development tooling, the new README sections.",
+   "commits": [
+    "7ea0f6f"
+   ]
+  },
+  "wf_ce880d66-b3c": {
+   "purpose": "Review of this evidence directory before it was committed: privacy of the exported files, fidelity of the export, the facts stated in the documents, the view of an evaluator, and a critic.",
+   "commits": [
+    ""
+   ]
+  },
+  "wf_64f4f895-96e": {
+   "purpose": "Second review of this evidence directory, after it had been rebuilt with the changes the first review led to: privacy, fidelity of the export, facts and requirements.",
+   "commits": [
+    ""
+   ]
+  },
+  "wf_9ebd21af-0fe": {
+   "purpose": "Third and last review of this evidence directory before it was committed: a privacy check against the tool's files, a reading by a session that was given only the files to be published, and a check of the facts stated in the documents.",
+   "commits": [
+    ""
+   ]
+  },
+  "wf_be7a6b64-0c4": {
+   "purpose": "Check of the finished application against the official wording of sections 2 to 4 of the assignment, which had reached the session late: two sub-agents acting as the company's evaluators, each from a clean clone - constraints and product scope in a browser; demo data and scenarios A1 to A7 by the README's steps and by checks of their own.",
+   "commits": [
+    "7ea0f6f",
+    ""
+   ]
+  }
+ },
+ "readable_intro": "# Reading copy of the main session\n\nThese files are a rendering of [`../61a877e9-483e-575a-b7cf-c5b8e94decb9.jsonl`](../61a877e9-483e-575a-b7cf-c5b8e94decb9.jsonl) for people: prompts, assistant messages, and every tool call with its input and result, in order. They are generated from that file (`ai/export/build_indexes.py`) and contain nothing that is not in it.\n\n- **The `.jsonl` is the record.** Here, long tool inputs and outputs are cut after a few thousand characters, with a note saying how many characters follow and on which line of the `.jsonl` they are. Prompts typed by the candidate and messages of the assistant are never shortened.\n- Each block starts with the line number of the entry in the `.jsonl` and its time (UTC).\n- \"candidate\" marks what the candidate typed. \"tool notice\", \"background-task notice\" and \"summary written by the tool\" are texts the tool itself put into the conversation.\n- `[REDACTED: reason]` marks removed text; the reasons are listed in [`ai/README.md`](../../README.md).\n- Links inside quoted text (a README that was written or printed during the session, say) are part of the quotation and may lead nowhere from here.",
+ "subagents_intro": "# Sub-agent runs\n\nThe main session started eleven runs of sub-agents (\"workflows\") to have its work checked by sessions that had not written it - in one case to implement and repair the UI, in three to review this evidence before it was committed. Each sub-agent is a session of its own, with its own export file. This page is generated from those files (`ai/export/build_indexes.py`): what each run was for, which commits its findings went into, and how each sub-agent ended.\n\nWhat a sub-agent was asked is in `script.js` of its run (the prompt is built there) and at the start of its session file. What it answered is in `run.json` and `journal.jsonl`.\n\nTwo further runs (six sub-agent sessions, `wf_34e04759-afc` and `wf_7ccfb441-20f`) belong to the unrelated request that was handled in the same session. They are not exported; see [`ai/README.md`](../../README.md).",
+ "sessions_after_export": [
+  {
+   "session_id": "wf_8eb472f6-4d3/agent-a898d5877181f1443",
+   "run": "wf_8eb472f6-4d3",
+   "model": "[REDACTED: model identifier B]",
+   "started_at": "2026-11-24T11:31:14.448Z",
+   "ended_at": "2026-11-24T11:37:46.288Z",
+   "purpose": "check:outsider: last privacy check of the newest part of this evidence directory (lines 6843 to 7284 and the two newest runs) before the repository was made public. Started after the last exported line.",
+   "commits": [
+    ""
+   ]
+  },
+  {
+   "session_id": "wf_8eb472f6-4d3/agent-afe168ac30730ff56",
+   "run": "wf_8eb472f6-4d3",
+   "model": "[REDACTED: model identifier B]",
+   "started_at": "2026-11-24T11:31:09.448Z",
+   "ended_at": "2026-11-24T11:43:21.384Z",
+   "purpose": "check:privacy: last privacy check of the newest part of this evidence directory (lines 6843 to 7284 and the two newest runs) before the repository was made public. Started after the last exported line.",
+   "commits": [
+    ""
+   ]
+  }
+ ]
+}

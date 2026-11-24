@@ -1,0 +1,1 @@
+{"agentType": "workflow-subagent", "isBuiltIn": true, "description": "confirm:readme-claims", "workflowPhase": "Confirm", "spawnDepth": 1, "requestShape": "foreground", "requestNonInteractive": true, "model": "[REDACTED: model identifier B]", "pickedEffortModel": "[REDACTED: model identifier A]", "inWorkflowRun": true}

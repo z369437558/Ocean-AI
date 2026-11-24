@@ -1,0 +1,662 @@
+     1	import { useEffect, useState } from 'react';
+     2	
+     3	import { navigate, useDebouncedValue, useQuery } from '../hooks.js';
+     4	import CertificateDetail from './CertificateDetail.jsx';
+     5	import { EmptyState, ErrorState, Pagination, Spinner, StatusBadge } from './ui.jsx';
+     6	
+     7	const COLUMNS = [
+     8	  { field: 'serial', label: 'Serial number', defaultOrder: 'asc' },
+     9	  { field: 'learner', label: 'Learner', defaultOrder: 'asc' },
+    10	  { field: 'course', label: 'Course', defaultOrder: 'asc' },
+    11	  { field: 'issued', label: 'Issued', defaultOrder: 'desc' },
+    12	  { field: 'status', label: 'Status', defaultOrder: 'asc' },
+    13	];
+    14	
+    15	const SORT_OPTIONS = [
+    16	  { value: 'issued:desc', label: 'Issue date – newest first' },
+    17	  { value: 'issued:asc', label: 'Issue date – oldest first' },
+    18	  { value: 'learner:asc', label: 'Learner – A to Z' },
+    19	  { value: 'learner:desc', label: 'Learner – Z to A' },
+    20	  { value: 'course:asc', label: 'Course – A to Z' },
+    21	  { value: 'course:desc', label: 'Course – Z to A' },
+    22	  { value: 'serial:asc', label: 'Serial number – ascending' },
+    23	  { value: 'serial:desc', label: 'Serial number – descending' },
+    24	  { value: 'status:asc', label: 'Status – active first' },
+    25	  { value: 'status:desc', label: 'Status – revoked first' },
+    26	];
+    27	
+    28	const PAGE_SIZES = [10, 25, 50, 100];
+    29	
+    30	function formatBytes(bytes) {
+    31	  if (bytes < 1024) return `${bytes} B`;
+    32	  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    33	  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    34	}
+    35	
+    36	export default function CertificatesPage({ api, actor, selectedCertificateId }) {
+    37	  const [searchText, setSearchText] = useState('');
+    38	  const [search, setSearch] = useDebouncedValue(searchText.trim(), 300);
+    39	  const [status, setStatus] = useState('all');
+    40	  const [sort, setSort] = useState({ field: 'issued', order: 'desc' });
+    41	  const [pageSize, setPageSize] = useState(25);
+    42	
+    43	  // The page number belongs to one particular search/sort. Whenever those change, the list starts
+    44	  // over at page 1 in the same render - no extra request for a page of the previous result set.
+    45	  const filterKey = JSON.stringify([search, status, sort.field, sort.order, pageSize]);
+    46	  const [pageState, setPageState] = useState({ key: filterKey, page: 1 });
+    47	  const page = pageState.key === filterKey ? pageState.page : 1;
+    48	  const setPage = (next) => setPageState({ key: filterKey, page: next });
+    49	
+    50	  const filters = { q: search, status, sort: sort.field, order: sort.order };
+    51	  const list = useQuery((signal) => api.listCertificates({ ...filters, page, pageSize }, signal), [api, filterKey, page]);
+    52	  const { data } = list;
+    53	
+    54	  // If rows disappeared underneath us (the last page no longer exists), step back to the last page.
+    55	  useEffect(() => {
+    56	    if (list.status === 'success' && data.items.length === 0 && data.total > 0 && page > data.totalPages) {
+    57	      setPageState({ key: filterKey, page: data.totalPages });
+    58	    }
+    59	  }, [list.status, data, page, filterKey]);
+    60	
+    61	  const [exportState, setExportState] = useState({ status: 'idle' });
+    62	
+    63	  async function handleExport() {
+    64	    if (exportState.status === 'running') return; // one export at a time per window
+    65	    const q = searchText.trim();
+    66	    setSearch(q); // apply pending keystrokes now, so the table and the file show the same rows
+    67	    setExportState({ status: 'running' });
+    68	    try {
+    69	      const result = await api.exportCsv({ q, status, sort: sort.field, order: sort.order });
+    70	      setExportState({ status: 'done', ...result });
+    71	    } catch (error) {
+    72	      setExportState({ status: 'error', error });
+    73	    }
+    74	  }
+    75	
+    76	  function sortBy(column) {
+    77	    setSort((current) =>
+    78	      current.field === column.field
+    79	        ? { field: column.field, order: current.order === 'asc' ? 'desc' : 'asc' }
+    80	        : { field: column.field, order: column.defaultOrder },
+    81	    );
+    82	  }
+    83	
+    84	  function clearFilters() {
+    85	    setSearchText('');
+    86	    setSearch('');
+    87	    setStatus('all');
+    88	  }
+    89	
+    90	  const hasFilters = search !== '' || status !== 'all';
+    91	  const isFirstLoad = list.status === 'loading' && !data;
+    92	  const isRefreshing = list.status === 'loading' && Boolean(data);
+    93	
+    94	  return (
+    95	    <>
+    96	      <section className="panel" aria-labelledby="certificates-heading">
+    97	        <div className="panel-header">
+    98	          <div>
+    99	            <h1 id="certificates-heading">Certificates</h1>
+   100	            <p className="muted">
+   101	              Tenant <strong>{actor.tenant.name}</strong> · issue dates are shown in {actor.tenant.timezone} local time
+   102	            </p>
+   103	          </div>
+   104	          <div className="panel-actions">
+   105	            <button
+   106	              type="button"
+   107	              className="btn"
+   108	              onClick={handleExport}
+   109	              disabled={exportState.status === 'running'}
+   110	              data-testid="export-button"
+   111	            >
+   112	              {exportState.status === 'running' ? <Spinner label="Exporting…" /> : 'Export CSV'}
+   113	            </button>
+   114	          </div>
+   115	        </div>
+   116	
+   117	        <form
+   118	          className="toolbar"
+   119	          role="search"
+   120	          onSubmit={(event) => {
+   121	            event.preventDefault();
+   122	            setSearch(searchText.trim());
+   123	          }}
+   124	        >
+   125	          <label className="field field-grow">
+   126	            <span className="field-label">Search</span>
+   127	            <input
+   128	              type="search"
+   129	              value={searchText}
+   130	              maxLength={100}
+   131	              placeholder="Learner name or serial number"
+   132	              onChange={(event) => setSearchText(event.target.value)}
+   133	              data-testid="search-input"
+   134	            />
+   135	          </label>
+   136	          <label className="field">
+   137	            <span className="field-label">Status</span>
+   138	            <select value={status} onChange={(event) => setStatus(event.target.value)} data-testid="status-filter">
+   139	              <option value="all">All</option>
+   140	              <option value="active">Active</option>
+   141	              <option value="revoked">Revoked</option>
+   142	            </select>
+   143	          </label>
+   144	          <label className="field">
+   145	            <span className="field-label">Sort by</span>
+   146	            <select
+   147	              value={`${sort.field}:${sort.order}`}
+   148	              onChange={(event) => {
+   149	                const [field, order] = event.target.value.split(':');
+   150	                setSort({ field, order });
+   151	              }}
+   152	              data-testid="sort-select"
+   153	            >
+   154	              {SORT_OPTIONS.map((option) => (
+   155	                <option key={option.value} value={option.value}>
+   156	                  {option.label}
+   157	                </option>
+   158	              ))}
+   159	            </select>
+   160	          </label>
+   161	          <label className="field">
+   162	            <span className="field-label">Rows per page</span>
+   163	            <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))} data-testid="page-size">
+   164	              {PAGE_SIZES.map((size) => (
+   165	                <option key={size} value={size}>
+   166	                  {size}
+   167	                </option>
+   168	              ))}
+   169	            </select>
+   170	          </label>
+   171	        </form>
+   172	
+   173	        <div className="export-status" aria-live="polite">
+   174	          {exportState.status === 'running' ? (
+   175	            <p className="note">
+   176	              Preparing the export for the current search and sort order. Large exports can take a moment; you can keep
+   177	              working meanwhile.
+   178	            </p>
+   179	          ) : null}
+   180	          {exportState.status === 'done' ? (
+   181	            <p className="note note-success" data-testid="export-done">
+   182	              Export saved as <strong>{exportState.fileName}</strong> ({formatBytes(exportState.bytes)}).{' '}
+   183	              <button type="button" className="link" onClick={() => setExportState({ status: 'idle' })}>
+   184	                Dismiss
+   185	              </button>
+   186	            </p>
+   187	          ) : null}
+   188	          {exportState.status === 'error' ? (
+   189	            <p className="note note-error" role="alert">
+   190	              Export failed: {exportState.error.message}{' '}
+   191	              <button type="button" className="link" onClick={handleExport}>
+   192	                Try again
+   193	              </button>
+   194	            </p>
+   195	          ) : null}
+   196	        </div>
+   197	
+   198	        <div className="table-wrap" aria-busy={list.status === 'loading'} data-testid="certificate-list" data-state={list.status}>
+   199	          {list.status === 'error' ? (
+   200	            <ErrorState title="Certificates could not be loaded" error={list.error} onRetry={list.reload} />
+   201	          ) : isFirstLoad ? (
+   202	            <div className="state state-loading" data-testid="list-loading">
+   203	              <Spinner label="Loading certificates…" />
+   204	            </div>
+   205	          ) : data.items.length === 0 && !isRefreshing ? (
+   206	            hasFilters ? (
+   207	              <EmptyState
+   208	                title="No certificates match your search"
+   209	                action={
+   210	                  <button type="button" className="btn" onClick={clearFilters}>
+   211	                    Clear search and filters
+   212	                  </button>
+   213	                }
+   214	              >
+   215	                {search ? `Nothing found for “${search}”` : 'Nothing found'}
+   216	                {status !== 'all' ? ` with status ${status}` : ''}. Search looks at learner names and serial numbers.
+   217	              </EmptyState>
+   218	            ) : (
+   219	              <EmptyState
+   220	                title="No certificates yet"
+   221	                action={
+   222	                  <a className="btn btn-primary" href="#/bulk-issue">
+   223	                    Go to bulk issue
+   224	                  </a>
+   225	                }
+   226	              >
+   227	                Certificates appear here once they have been issued for a course.
+   228	              </EmptyState>
+   229	            )
+   230	          ) : (
+   231	            <table className={isRefreshing ? 'data-table is-refreshing' : 'data-table'}>
+   232	              <thead>
+   233	                <tr>
+   234	                  {COLUMNS.map((column) => {
+   235	                    const active = sort.field === column.field;
+   236	                    return (
+   237	                      <th
+   238	                        key={column.field}
+   239	                        scope="col"
+   240	                        aria-sort={active ? (sort.order === 'asc' ? 'ascending' : 'descending') : 'none'}
+   241	                      >
+   242	                        <button type="button" className="th-button" onClick={() => sortBy(column)} title={`Sort by ${column.label.toLowerCase()}`}>
+   243	                          {column.label}
+   244	                          {column.field === 'issued' ? <span className="th-hint"> ({actor.tenant.timezone})</span> : null}
+   245	                          <span className="sort-arrow" aria-hidden="true">
+   246	                            {active ? (sort.order === 'asc' ? '▲' : '▼') : '↕'}
+   247	                          </span>
+   248	                        </button>
+   249	                      </th>
+   250	                    );
+   251	                  })}
+   252	                </tr>
+   253	              </thead>
+   254	              <tbody>
+   255	                {data.items.map((certificate) => (
+   256	                  <tr
+   257	                    key={certificate.id}
+   258	                    className={certificate.id === selectedCertificateId ? 'row-link row-selected' : 'row-link'}
+   259	                    onClick={() => navigate(`/certificates/${certificate.id}`)}
+   260	                  >
+   261	                    <td>
+   262	                      <a
+   263	                        href={`#/certificates/${certificate.id}`}
+   264	                        className="mono"
+   265	                        onClick={(event) => event.stopPropagation()}
+   266	                      >
+   267	                        {certificate.serialNumber}
+   268	                      </a>
+   269	                    </td>
+   270	                    <td>{certificate.learnerName}</td>
+   271	                    <td>{certificate.courseTitle}</td>
+   272	                    <td className="nowrap" title={`${certificate.issuedAt} (UTC)`}>
+   273	                      {certificate.issuedLocal}
+   274	                    </td>
+   275	                    <td>
+   276	                      <StatusBadge status={certificate.status} />
+   277	                    </td>
+   278	                  </tr>
+   279	                ))}
+   280	              </tbody>
+   281	            </table>
+   282	          )}
+   283	          {isRefreshing ? (
+   284	            <div className="refreshing" data-testid="list-refreshing">
+   285	              <Spinner label="Loading…" />
+   286	            </div>
+   287	          ) : null}
+   288	        </div>
+   289	
+   290	        {data && list.status !== 'error' ? (
+   291	          <Pagination
+   292	            page={page}
+   293	            totalPages={data.totalPages}
+   294	            total={data.total}
+   295	            pageSize={pageSize}
+   296	            itemCount={data.items.length}
+   297	            disabled={list.status === 'loading'}
+   298	            onPageChange={setPage}
+   299	          />
+   300	        ) : null}
+   301	      </section>
+   302	
+   303	      {selectedCertificateId !== null ? (
+   304	        <CertificateDetail
+   305	          key={selectedCertificateId}
+   306	          api={api}
+   307	          certificateId={selectedCertificateId}
+   308	          onClose={() => navigate('/certificates')}
+   309	          onChanged={list.reload}
+   310	        />
+   311	      ) : null}
+   312	    </>
+   313	  );
+   314	}
+   315	import { useRef, useState } from 'react';
+   316	
+   317	import { useQuery } from '../hooks.js';
+   318	import { Dialog, ErrorState, Spinner, StatusBadge } from './ui.jsx';
+   319	
+   320	const ACTION_LABELS = {
+   321	  'certificate.issued': 'Certificate issued',
+   322	  'certificate.revoked': 'Certificate revoked',
+   323	};
+   324	
+   325	const MAX_REASON_LENGTH = 500;
+   326	
+   327	/** Confirmation step for revoking: nothing is sent until the admin explicitly confirms. */
+   328	function RevokeDialog({ api, certificate, onCancel, onRevoked }) {
+   329	  const [reason, setReason] = useState('');
+   330	  const [state, setState] = useState({ status: 'idle', error: null });
+   331	  const submitting = useRef(false);
+   332	
+   333	  async function confirm() {
+   334	    if (submitting.current) return; // ignore double clicks while the request is on its way
+   335	    submitting.current = true;
+   336	    setState({ status: 'submitting', error: null });
+   337	    try {
+   338	      onRevoked(await api.revokeCertificate(certificate.id, reason.trim() || undefined));
+   339	    } catch (error) {
+   340	      submitting.current = false;
+   341	      setState({ status: 'error', error });
+   342	    }
+   343	  }
+   344	
+   345	  const busy = state.status === 'submitting';
+   346	  return (
+   347	    <Dialog onClose={onCancel} locked={busy} labelledBy="revoke-title">
+   348	      <form
+   349	        className="dialog-body"
+   350	        onSubmit={(event) => {
+   351	          event.preventDefault();
+   352	          confirm();
+   353	        }}
+   354	        data-testid="revoke-dialog"
+   355	      >
+   356	        <h2 id="revoke-title">Revoke this certificate?</h2>
+   357	        <p>
+   358	          <span className="mono">{certificate.serialNumber}</span> was issued to <strong>{certificate.learnerName}</strong> for{' '}
+   359	          <strong>{certificate.courseTitle}</strong>. After revocation it is no longer valid. This cannot be undone, and
+   360	          the action is recorded in the audit trail.
+   361	        </p>
+   362	        <label className="field">
+   363	          <span className="field-label">Reason (optional)</span>
+   364	          <textarea
+   365	            rows={3}
+   366	            maxLength={MAX_REASON_LENGTH}
+   367	            value={reason}
+   368	            disabled={busy}
+   369	            placeholder="e.g. Issued in error"
+   370	            onChange={(event) => setReason(event.target.value)}
+   371	            data-testid="revoke-reason"
+   372	          />
+   373	        </label>
+   374	        {state.status === 'error' ? (
+   375	          <p className="note note-error" role="alert">
+   376	            The certificate was not revoked: {state.error.message}
+   377	          </p>
+   378	        ) : null}
+   379	        <div className="dialog-actions">
+   380	          <button type="button" className="btn" onClick={onCancel} disabled={busy}>
+   381	            Cancel
+   382	          </button>
+   383	          <button type="submit" className="btn btn-danger" disabled={busy} data-testid="revoke-confirm">
+   384	            {busy ? <Spinner label="Revoking…" /> : state.status === 'error' ? 'Try again' : 'Revoke certificate'}
+   385	          </button>
+   386	        </div>
+   387	      </form>
+   388	    </Dialog>
+   389	  );
+   390	}
+   391	
+   392	function Field({ label, children }) {
+   393	  return (
+   394	    <div className="detail-field">
+   395	      <dt>{label}</dt>
+   396	      <dd>{children}</dd>
+   397	    </div>
+   398	  );
+   399	}
+   400	
+   401	export default function CertificateDetail({ api, certificateId, onClose, onChanged }) {
+   402	  const detail = useQuery((signal) => api.getCertificate(certificateId, signal), [api, certificateId]);
+   403	  const [revoked, setRevoked] = useState(null); // server state returned by a successful revoke
+   404	  const [confirming, setConfirming] = useState(false);
+   405	  const certificate = revoked ?? detail.data;
+   406	
+   407	  function handleRevoked(updated) {
+   408	    setRevoked(updated);
+   409	    setConfirming(false);
+   410	    onChanged();
+   411	  }
+   412	
+   413	  return (
+   414	    <>
+   415	    <Dialog title="Certificate details" variant="drawer" onClose={onClose}>
+   416	      <div className="drawer-header">
+   417	        <h2>Certificate</h2>
+   418	        <button type="button" className="btn btn-small" onClick={onClose} aria-label="Close details">
+   419	          Close ✕
+   420	        </button>
+   421	      </div>
+   422	
+   423	      <div className="drawer-body" data-testid="certificate-detail">
+   424	        {!certificate && detail.status === 'loading' ? (
+   425	          <div className="state state-loading">
+   426	            <Spinner label="Loading certificate…" />
+   427	          </div>
+   428	        ) : !certificate ? (
+   429	          detail.error?.status === 404 ? (
+   430	            <ErrorState
+   431	              title="Certificate not found"
+   432	              error={{ message: 'It does not exist in this tenant. It may belong to another tenant or the link may be outdated.' }}
+   433	            />
+   434	          ) : (
+   435	            <ErrorState title="The certificate could not be loaded" error={detail.error} onRetry={detail.reload} />
+   436	          )
+   437	        ) : (
+   438	          <>
+   439	            {revoked ? (
+   440	              <p className="note note-success" role="status" data-testid="revoke-result">
+   441	                {revoked.alreadyRevoked
+   442	                  ? 'This certificate had already been revoked; nothing was changed.'
+   443	                  : 'The certificate has been revoked.'}
+   444	              </p>
+   445	            ) : null}
+   446	
+   447	            <div className="detail-title">
+   448	              <span className="mono detail-serial" data-testid="detail-serial">
+   449	                {certificate.serialNumber}
+   450	              </span>
+   451	              <span data-testid="detail-status">
+   452	                <StatusBadge status={certificate.status} />
+   453	              </span>
+   454	            </div>
+   455	
+   456	            <dl className="detail-grid">
+   457	              <Field label="Learner">{certificate.learnerName}</Field>
+   458	              <Field label="Course">{certificate.courseTitle}</Field>
+   459	              <Field label={`Issue date (${certificate.tenant.timezone})`}>
+   460	                <span data-testid="detail-issued-local">{certificate.issuedLocal}</span>
+   461	                <span className="muted small"> UTC{certificate.issuedUtcOffset}</span>
+   462	                <div className="muted small">UTC: {certificate.issuedAt}</div>
+   463	              </Field>
+   464	              <Field label="Issued by">
+   465	                {certificate.issuedBy ?? '—'}
+   466	                {certificate.bulkOperationId ? <span className="muted small"> · bulk operation #{certificate.bulkOperationId}</span> : null}
+   467	              </Field>
+   468	              {certificate.status === 'revoked' ? (
+   469	                <>
+   470	                  <Field label={`Revoked (${certificate.tenant.timezone})`}>
+   471	                    {certificate.revokedLocal}
+   472	                    <div className="muted small">UTC: {certificate.revokedAt}</div>
+   473	                  </Field>
+   474	                  <Field label="Revoked by">{certificate.revokedBy ?? '—'}</Field>
+   475	                  <Field label="Revocation reason">{certificate.revocationReason ?? 'No reason given'}</Field>
+   476	                </>
+   477	              ) : null}
+   478	            </dl>
+   479	
+   480	            {certificate.status === 'active' ? (
+   481	              <div className="detail-actions">
+   482	                <button type="button" className="btn btn-danger" onClick={() => setConfirming(true)} data-testid="revoke-button">
+   483	                  Revoke certificate…
+   484	                </button>
+   485	              </div>
+   486	            ) : null}
+   487	
+   488	            <h3>Audit trail</h3>
+   489	            <ol className="audit-list" data-testid="audit-trail">
+   490	              {certificate.auditEvents.map((event) => (
+   491	                <li key={event.id}>
+   492	                  <div>
+   493	                    <strong>{ACTION_LABELS[event.action] ?? event.action}</strong>
+   494	                    <span className="muted"> by {event.actorEmail}</span>
+   495	                  </div>
+   496	                  <div className="muted small">
+   497	                    {event.createdLocal} ({certificate.tenant.timezone})
+   498	                    {event.details?.reason ? ` · reason: ${event.details.reason}` : ''}
+   499	                    {event.bulkOperationId ? ` · bulk operation #${event.bulkOperationId}` : ''}
+   500	                  </div>
+   501	                </li>
+   502	              ))}
+   503	            </ol>
+   504	          </>
+   505	        )}
+   506	      </div>
+   507	    </Dialog>
+   508	
+   509	      {confirming && certificate ? (
+   510	        <RevokeDialog api={api} certificate={certificate} onCancel={() => setConfirming(false)} onRevoked={handleRevoked} />
+   511	      ) : null}
+   512	    </>
+   513	  );
+   514	}
+   515	import { useEffect, useRef } from 'react';
+   516	
+   517	export function Spinner({ label }) {
+   518	  return (
+   519	    <span className="spinner-wrap" role="status">
+   520	      <span className="spinner" aria-hidden="true" />
+   521	      {label ? <span>{label}</span> : <span className="sr-only">Loading</span>}
+   522	    </span>
+   523	  );
+   524	}
+   525	
+   526	const STATUS_LABELS = { active: 'Active', revoked: 'Revoked' };
+   527	
+   528	export function StatusBadge({ status }) {
+   529	  return <span className={`badge badge-${status}`}>{STATUS_LABELS[status] ?? status}</span>;
+   530	}
+   531	
+   532	const OUTCOME_LABELS = { issued: 'Issued', skipped: 'Skipped', failed: 'Failed' };
+   533	
+   534	export function OutcomeBadge({ outcome }) {
+   535	  return <span className={`badge badge-${outcome}`}>{OUTCOME_LABELS[outcome] ?? outcome}</span>;
+   536	}
+   537	
+   538	/** Error panel with the server's message and, when it makes sense, a way to try again. */
+   539	export function ErrorState({ title = 'Something went wrong', error, onRetry, retryLabel = 'Try again' }) {
+   540	  return (
+   541	    <div className="state state-error" role="alert">
+   542	      <div className="state-icon" aria-hidden="true">
+   543	        !
+   544	      </div>
+   545	      <div className="state-body">
+   546	        <strong>{title}</strong>
+   547	        <p>{error?.message ?? 'Unexpected error'}</p>
+   548	        {error?.status ? <p className="muted small">HTTP {error.status}{error.code ? ` · ${error.code}` : ''}</p> : null}
+   549	      </div>
+   550	      {onRetry ? (
+   551	        <button type="button" className="btn" onClick={onRetry}>
+   552	          {retryLabel}
+   553	        </button>
+   554	      ) : null}
+   555	    </div>
+   556	  );
+   557	}
+   558	
+   559	export function EmptyState({ title, children, action }) {
+   560	  return (
+   561	    <div className="state state-empty">
+   562	      <div className="state-body">
+   563	        <strong>{title}</strong>
+   564	        {children ? <p>{children}</p> : null}
+   565	      </div>
+   566	      {action}
+   567	    </div>
+   568	  );
+   569	}
+   570	
+   571	export function Pagination({ page, totalPages, total, pageSize, itemCount, disabled, onPageChange, noun = 'certificates' }) {
+   572	  const first = total === 0 ? 0 : (page - 1) * pageSize + 1;
+   573	  const last = total === 0 ? 0 : first + itemCount - 1;
+   574	  const format = (n) => n.toLocaleString('en-US');
+   575	  return (
+   576	    <nav className="pagination" aria-label="Pagination">
+   577	      <span className="muted" aria-live="polite">
+   578	        {total === 0 ? `No ${noun}` : `${format(first)}–${format(last)} of ${format(total)} ${noun}`}
+   579	      </span>
+   580	      <div className="pagination-buttons">
+   581	        <button type="button" className="btn btn-small" disabled={disabled || page <= 1} onClick={() => onPageChange(1)}>
+   582	          « First
+   583	        </button>
+   584	        <button type="button" className="btn btn-small" disabled={disabled || page <= 1} onClick={() => onPageChange(page - 1)}>
+   585	          ‹ Previous
+   586	        </button>
+   587	        <span className="pagination-page">
+   588	          Page {format(page)} of {format(totalPages)}
+   589	        </span>
+   590	        <button
+   591	          type="button"
+   592	          className="btn btn-small"
+   593	          disabled={disabled || page >= totalPages}
+   594	          onClick={() => onPageChange(page + 1)}
+   595	        >
+   596	          Next ›
+   597	        </button>
+   598	        <button
+   599	          type="button"
+   600	          className="btn btn-small"
+   601	          disabled={disabled || page >= totalPages}
+   602	          onClick={() => onPageChange(totalPages)}
+   603	        >
+   604	          Last »
+   605	        </button>
+   606	      </div>
+   607	    </nav>
+   608	  );
+   609	}
+   610	
+   611	/**
+   612	 * Modal layer used for the certificate drawer and the revoke confirmation.
+   613	 * Escape and a click on the backdrop close it (unless `locked`, e.g. while a request is running);
+   614	 * focus moves into the dialog on open and returns to the previously focused element on close.
+   615	 */
+   616	export function Dialog({ title, onClose, locked = false, variant = 'modal', children, labelledBy }) {
+   617	  const panelRef = useRef(null);
+   618	  const onCloseRef = useRef(onClose);
+   619	  onCloseRef.current = onClose;
+   620	  const lockedRef = useRef(locked);
+   621	  lockedRef.current = locked;
+   622	
+   623	  useEffect(() => {
+   624	    const previouslyFocused = document.activeElement;
+   625	    panelRef.current?.focus();
+   626	    const onKeyDown = (event) => {
+   627	      if (event.key !== 'Escape' || lockedRef.current) return;
+   628	      // Only the top-most dialog reacts, so Escape closes the confirmation before the drawer.
+   629	      const dialogs = document.querySelectorAll('[role="dialog"]');
+   630	      if (dialogs[dialogs.length - 1] === panelRef.current) {
+   631	        event.stopPropagation();
+   632	        onCloseRef.current();
+   633	      }
+   634	    };
+   635	    document.addEventListener('keydown', onKeyDown);
+   636	    return () => {
+   637	      document.removeEventListener('keydown', onKeyDown);
+   638	      if (previouslyFocused instanceof HTMLElement && document.contains(previouslyFocused)) previouslyFocused.focus();
+   639	    };
+   640	  }, []);
+   641	
+   642	  return (
+   643	    <div
+   644	      className={`overlay overlay-${variant}`}
+   645	      onMouseDown={(event) => {
+   646	        if (event.target === event.currentTarget && !locked) onClose();
+   647	      }}
+   648	    >
+   649	      <div
+   650	        ref={panelRef}
+   651	        className={`dialog dialog-${variant}`}
+   652	        role="dialog"
+   653	        aria-modal="true"
+   654	        aria-label={labelledBy ? undefined : title}
+   655	        aria-labelledby={labelledBy}
+   656	        tabIndex={-1}
+   657	      >
+   658	        {children}
+   659	      </div>
+   660	    </div>
+   661	  );
+   662	}

@@ -1,0 +1,83 @@
+81 /tmp/claude-0/-home-user/61a877e9-483e-575a-b7cf-c5b8e94decb9/scratchpad/final/test-quality/logs/snap-before-anything.txt
+== tmp entries (os tmpdir=/tmp)
+60
+cc-socks
+cert-admin-ops-ZhOsp0
+cert-admin-ops-yFyBFc
+cert-admin-scale-5mVoEm
+cert-admin-test-fwHvGP
+claude-0
+claude-append-system-prompt.txt
+claude-code-291123386.diag.log
+claude-code-3823589842.diag.log
+claude-code-912381848.diag.log
+claude-code-912381848.diag.log.disk-watchdog.pid
+claude-code.log
+claude-command
+claude-preload.out
+code-sign
+codesign-mcp-config.json
+env-manager.log
+environment-manager-24612436.diag.log
+environment-manager-4196709085.diag.log
+environment-manager-539154256.diag.log
+environment-manager-cse_01N8a9P4ffov11BZN7rrXK3k.lock
+environment-manager.out
+hsperfdata_root
+initgoogle_syslog_dir.0
+mcp-config-cse_01N8a9P4ffov11BZN7rrXK3k.json
+node-compile-cache
+playwright-artifacts-485bNE
+playwright-artifacts-XxRyY4
+playwright_firefoxdev_profile-Zv4LSh
+playwright_webkitdev_profile-57NJW5
+ruby-build.20261116184341.550.log
+ruby-build.20261116184445.12514.log
+ruby-build.20261116184548.24700.log
+tmp.ClcBOw2vOJ
+tmp.ClcBOw2vOJ.diff
+tmp.P16khLX2hz
+tmp.P16khLX2hz.diff
+tmp.TEImzaubhO
+tmp.TEImzaubhO.diff
+tmp.YULBtGDGIO
+tmp.YULBtGDGIO.diff
+tmp.bMrqvSUBpk
+tmp.bMrqvSUBpk.diff
+tmp.fEfNTPzkdU
+tmp.fEfNTPzkdU.diff
+tmp.fllp53C0cA
+tmp.fllp53C0cA.diff
+tmp.jIfclWyYSp
+tmp.jIfclWyYSp.diff
+tmp.qXwp0F619j
+tmp.qXwp0F619j.diff
+tmp.u8jFzDtUHK
+tmp.u8jFzDtUHK.diff
+tmp.z8f4jdaLre
+tmp.z8f4jdaLre.diff
+uv-bcb837755ba79986.lock
+v8-compile-cache-0
+== listening
+== node procs
+   91     1   38636 /bin/sh -c if ! { [ ! -L /var/lib/ccr-ca-store ] && { [ ! -e /var/lib/ccr-ca-store ] || { [ -d /var/lib/ccr-ca-store ] && [ -O /var/lib/ccr-ca-store ] ; } ; } ; } ; then true ; elif true 2>/dev/null >/var/lib/ccr-ca-store/exit >/var/lib/ccr-ca-store/programs-exit ; [ -f /var/lib/ccr-ca-store/programs.1dfe42c819fe ] ; then echo 9 2>/dev/null >/var/lib/ccr-ca-store/programs-exit ; elif ccr_ca_run="$(PATH=/usr/sbin:/usr/bin:/sbin:/bin ; echo [REDACTED: encoded data inside a text, such as a script in a process listing of the container (not conversation content), 13252 characters] | base64 -d 2>/dev/null)" && [ "${#ccr_ca_run}" -eq 9937 ] ; then command eval "$ccr_ca_run" ; else PATH=/usr/sbin:/usr/bin:/sbin:/bin mkdir -p -m 700 /var/lib/ccr-ca-store 2>/dev/null ; echo 21 2>/dev/null >/var/lib/ccr-ca-store/programs-exit ; fi ; ccr_ca_run= ; if [ ! -e /etc/ssl/certs ] && [ ! -L /etc/ssl/certs ] && { [ ! -L /var/lib/ccr-ca-store ] && { [ ! -e /var/lib/ccr-ca-store ] || { [ -d /var/lib/ccr-ca-store ] && [ -O /var/lib/ccr-ca-store ] ; } ; } ; } ; then ccr_cert_store="$(PATH=/usr/sbin:/usr/bin:/sbin:/bin ; echo [REDACTED: encoded data inside a text, such as a script in a process listing of the container (not conversation content), 2360 characters] | base64 -d 2>/dev/null)" && [ "${#ccr_cert_store}" -eq 1768 ] && command eval "$ccr_cert_store" ; ccr_cert_store= ; fi ; if ! { [ ! -L /var/lib/ccr-ca-store ] && { [ ! -e /var/lib/ccr-ca-store ] || { [ -d /var/lib/ccr-ca-store ] && [ -O /var/lib/ccr-ca-store ] ; } ; } ; } ; then true ; elif true 2>/dev/null >/var/lib/ccr-ca-store/exit >/var/lib/ccr-ca-store/policy-exit ; [ -f /var/lib/ccr-ca-store/policy.4982eda491b5.2 ] ; then echo 9 2>/dev/null >/var/lib/ccr-ca-store/policy-exit ; elif ccr_ca_run="$(PATH=/usr/sbin:/usr/bin:/sbin:/bin ; echo [REDACTED: encoded data inside a text, such as a script in a process listing of the container (not conversation content), 11104 characters] | base64 -d 2>/dev/null)" && [ "${#ccr_ca_run}" -eq 8327 ] ; then command eval "$ccr_ca_run" ; else PATH=/usr/sbin:/usr/bin:/sbin:/bin mkdir -p -m 700 /var/lib/ccr-ca-store 2>/dev/null ; echo 21 2>/dev/null >/var/lib/ccr-ca-store/policy-exit ; fi ; ccr_ca_run= ; if ! { [ ! -L /var/lib/ccr-ca-store ] && { [ ! -e /var/lib/ccr-ca-store ] || { [ -d /var/lib/ccr-ca-store ] && [ -O /var/lib/ccr-ca-store ] ; } ; } ; } ; then true ; elif true 2>/dev/null >/var/lib/ccr-ca-store/exit ; [ -f /var/lib/ccr-ca-store/6df77e6769e4 ] && [ ! /var/lib/dp''kg/info/ca-certificates.list -nt /var/lib/ccr-ca-store/6df77e6769e4 ] ; then echo 9 2>/dev/null >/var/lib/ccr-ca-store/exit ; elif ccr_ca_run="$(PATH=/usr/sbin:/usr/bin:/sbin:/bin ; echo [REDACTED: encoded data inside a text, such as a script in a process listing of the container (not conversation content), 26116 characters] | base64 -d 2>/dev/null)" && [ "${#ccr_ca_run}" -eq 19586 ] ; then command eval "$ccr_ca_run" ; else PATH=/usr/sbin:/usr/bin:/sbin:/bin mkdir -p -m 700 /var/lib/ccr-ca-store 2>/dev/null ; echo 21 2>/dev/null >/var/lib/ccr-ca-store/exit ; fi ; ccr_ca_run= ; if [ -d /opt/claude-code ]; then [ -L /opt/node22/bin/claude ] && [ /opt/node22/bin/claude -ef /opt/claude-code/bin/claude ] || ln -sf /opt/claude-code/bin/claude /opt/node22/bin/claude; fi; if [ -d /opt/env-runner ]; then [ -L /usr/local/bin/environment-manager ] && [ /usr/local/bin/environment-manager -ef /opt/env-runner/environment-manager ] || ln -sf /opt/env-runner/environment-manager /usr/local/bin/environment-manager; fi; if [ -f /opt/env-runner/vitals-emitter-guest ]; then [ -L /usr/local/bin/vitals-emitter-guest ] && [ /usr/local/bin/vitals-emitter-guest -ef /opt/env-runner/vitals-emitter-guest ] || ln -sf /opt/env-runner/vitals-emitter-guest /usr/local/bin/vitals-emitter-guest; fi ; [ -d /home/user ] || mkdir -p /home/user ; cd /home/user && /usr/bin/base64 -d 2>>/tmp/environment-manager.out 9<&- | GZIP= /usr/bin/gzip -dc 2>>/tmp/environment-manager.out 9<&- | /usr/local/bin/environment-manager task-run --stdin --session cse_01N8a9P4ffov11BZN7rrXK3k --session-mode resume --upgrade-claude-code=False >>/tmp/environment-manager.out 2>&1
+14822     1     538 npm start
+14851 14822     538 sh -c npm install --include=dev --no-audit --no-fund && npm run build --workspace frontend && npm run start --workspace backend
+14943 14851     538 npm run start
+14954 14943     538 sh -c node src/server.js
+14955 14954     538 node src/server.js
+20645     1   18430 npm start
+20674 20645   18429 sh -c npm install --include=dev --no-audit --no-fund && npm run build --workspace frontend && npm run start --workspace backend
+20837 20674   18426 npm run start
+20854 20837   18426 sh -c node src/server.js
+20855 20854   18426 node src/server.js
+21026 19774      24 /bin/bash /tmp/claude-0/-home-user/61a877e9-483e-575a-b7cf-c5b8e94decb9/scratchpad/final/install-docs/tools/timed.sh npm test
+21028 21026      24 npm test
+21047 21028      24 sh -c npm install --include=dev --no-audit --no-fund && npm run test --workspace backend && npm run test --workspace frontend
+21071 21047      24 npm run test
+21082 21071      24 sh -c node --test --test-reporter=spec --test-concurrency=1 --test-timeout=1800000 test/unit.test.js test/acceptance.test.js test/scale.test.js
+21083 21082      24 node --test --test-reporter=spec --test-concurrency=1 --test-timeout=1800000 test/unit.test.js test/acceptance.test.js test/scale.test.js
+22158 21083       9 /opt/node22/bin/node --test-concurrency=1 --test-timeout=1800000 test/scale.test.js
+22275 22158       6 /opt/node22/bin/node --import ./test/support/exit-with-parent.mjs src/server.js
+ 06:56:56 up 10:43,  0 user,  load average: 1.18, 0.74, 0.85
+4

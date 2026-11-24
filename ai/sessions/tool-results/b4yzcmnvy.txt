@@ -1,0 +1,759 @@
+=================== services/bulkIssue.js
+     1	/**
+     2	 * Bulk issue: one certificate for every eligible learner of a course, with per-learner outcomes.
+     3	 *
+     4	 * Retry safety
+     5	 * ------------
+     6	 * The whole operation - idempotency lookup, eligibility check, certificates, audit events and the
+     7	 * stored response - is ONE `BEGIN IMMEDIATE` transaction. SQLite admits a single writer at a time,
+     8	 * so identical requests racing each other (in this process or in another one sharing the file) are
+     9	 * strictly serialised: the first one executes and commits its response next to the idempotency
+    10	 * key, every later one finds that row and replays the stored response byte for byte. There is no
+    11	 * observable "in progress" state and therefore no window in which a duplicate could slip through.
+    12	 *
+    13	 * Waiting for the write lock never blocks the process (see Connection.writeTransaction), and a
+    14	 * request that waits keeps looking for the stored response: once an identical request has
+    15	 * committed anywhere, every caller gets that same answer without further delay.
+    16	 *
+    17	 * A crash before COMMIT leaves nothing behind (no certificates, no audit events, no key), so the
+    18	 * client's retry simply runs the operation for the first time.
+    19	 *
+    20	 * Independently of idempotency keys, UNIQUE (tenant_id, course_id, learner_id) on certificates
+    21	 * makes a second certificate for the same learner and course impossible.
+    22	 */
+    23	import { HttpError, badRequest, notFound } from '../lib/errors.js';
+    24	import { requestFingerprint } from '../lib/fingerprint.js';
+    25	import { pathId } from '../lib/params.js';
+    26	import { localDateTime } from '../lib/time.js';
+    27	import { TransactionAbortedError } from '../db/sqlite.js';
+    28	import { classifyEnrollment, findCourse, loadRoster } from './courses.js';
+    29	import { issueCertificate } from './ledger.js';
+    30	
+    31	export const IDEMPOTENCY_HEADER = 'Idempotency-Key';
+    32	const ROUTE = '/api/bulk-issues';
+    33	const IDEMPOTENCY_KEY_PATTERN = /^[\x21-\x7E]{1,200}$/;
+    34	
+    35	export function parseIdempotencyKey(headerValue) {
+    36	  if (headerValue === undefined) return null;
+    37	  const key = String(headerValue).trim();
+    38	  if (!IDEMPOTENCY_KEY_PATTERN.test(key)) {
+    39	    throw badRequest(`${IDEMPOTENCY_HEADER} must be 1-200 printable ASCII characters without spaces`);
+    40	  }
+    41	  return key;
+    42	}
+    43	
+    44	function parseCourseId(body) {
+    45	  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    46	    throw badRequest('Request body must be a JSON object such as {"courseId": 1}');
+    47	  }
+    48	  const value = body.courseId ?? body.course_id;
+    49	  const courseId = Number.isSafeInteger(value) && value > 0 ? value : pathId(typeof value === 'string' ? value : '');
+    50	  if (courseId === null) throw badRequest('"courseId" is required and must be a positive integer');
+    51	  return courseId;
+    52	}
+    53	
+    54	/**
+    55	 * What the admin is told about a learner whose certificate could not be issued. The cause is an
+    56	 * internal error (it goes to the server log with the operation and learner id); its raw text -
+    57	 * constraint names, SQL - does not belong in an API response.
+    58	 */
+    59	const FAILURE_MESSAGE =
+    60	  'The certificate could not be issued because of an unexpected error. Nothing was saved for this learner; ' +
+    61	  'the server log has the details. Other learners are not affected.';
+    62	
+    63	/**
+    64	 * What an earlier request with this key left behind, if anything: its stored response when the
+    65	 * payload is the same, a 409 when it is not. Keys are scoped to (tenant, admin), so one actor can
+    66	 * never replay - or collide with - another actor's operation, let alone another tenant's.
+    67	 * `requestHash` null means "this request has no readable payload", which can only be a mismatch.
+    68	 */
+    69	function answerFromStoredKey(db, actor, idempotencyKey, requestHash) {
+    70	  if (idempotencyKey === null) return null;
+    71	  const previous = db.get(
+    72	    `SELECT id, request_hash, response_status, response_body
+    73	       FROM bulk_issue_operations
+    74	      WHERE tenant_id = @tenantId AND actor_admin_id = @adminId AND idempotency_key = @idempotencyKey`,
+    75	    { tenantId: actor.tenantId, adminId: actor.adminId, idempotencyKey },
+    76	  );
+    77	  if (!previous) return null;
+    78	  if (previous.request_hash !== requestHash) {
+    79	    throw new HttpError(
+    80	      409,
+    81	      'idempotency_key_reused',
+    82	      `${IDEMPOTENCY_HEADER} "${idempotencyKey}" was already used for a different request. ` +
+    83	        'Retry with the original payload, or use a new key for a new operation.',
+    84	      { operationId: previous.id },
+    85	    );
+    86	  }
+    87	  return { status: previous.response_status, body: previous.response_body, replayed: true, operationId: previous.id };
+    88	}
+    89	
+    90	/**
+    91	 * For requests whose body could not even be parsed: if the key has already been used, this is a
+    92	 * reuse with a different payload (409); otherwise the caller reports the body error itself.
+    93	 */
+    94	export function rejectReusedKeyWithUnreadableBody(db, actor, idempotencyKey) {
+    95	  answerFromStoredKey(db, actor, idempotencyKey, null);
+    96	}
+    97	
+    98	/**
+    99	 * Executes (or replays) a bulk issue.
+   100	 *
+   101	 * @returns {Promise<{ status: number, body: string, replayed: boolean, operationId: number }>}
+   102	 *   `body` is the JSON text of the operation; replays return the stored text unchanged.
+   103	 */
+   104	export async function bulkIssue(db, actor, { body, idempotencyKey }, { now = () => new Date(), hooks = {}, logger = console } = {}) {
+   105	  const requestHash = requestFingerprint('POST', ROUTE, body);
+   106	
+   107	  // Fast path: a key that already ran is answered from a plain read (replay or 409). It needs no
+   108	  // write lock, so retries are served even while another process is in the middle of a long write.
+   109	  const stored = answerFromStoredKey(db, actor, idempotencyKey, requestHash);
+   110	  if (stored) return stored;
+   111	
+   112	  // Obviously invalid requests are turned away before queueing for the write lock as well.
+   113	  if (!findCourse(db, actor, parseCourseId(body))) throw notFound('Course');
+   114	
+   115	  // While this request queues for the write lock, an identical one may complete elsewhere (another
+   116	  // server on the same file). From that moment the answer is known and is given straight away -
+   117	  // the same 201 the other caller got - even if the lock stays taken for longer than the wait.
+   118	  const whileWaiting = () => answerFromStoredKey(db, actor, idempotencyKey, requestHash) ?? undefined;
+   119	
+   120	  return db.writeTransaction(() => {
+   121	    // 1. The decisive idempotency check, now under the write lock: an identical request that was
+   122	    //    racing this one has either not started (we execute) or has committed (we replay).
+   123	    const raced = answerFromStoredKey(db, actor, idempotencyKey, requestHash);
+   124	    if (raced) return raced;
+   125	
+   126	    // 2. Validation. Nothing has been written yet, so a rejected request leaves no trace: no
+   127	    //    operation row, no idempotency record, no certificates, no audit events.
+   128	    const courseId = parseCourseId(body);
+   129	    const course = findCourse(db, actor, courseId);
+   130	    if (!course) throw notFound('Course'); // also the answer for another tenant's course
+   131	
+   132	    // 3. Execute.
+   133	    const startedAt = now().toISOString();
+   134	    const tenant = { id: actor.tenantId, code: actor.tenantCode, timezone: actor.timezone };
+   135	    const operationId = db.run(
+   136	      `INSERT INTO bulk_issue_operations (tenant_id, actor_admin_id, course_id, idempotency_key, request_hash, status, created_at)
+   137	       VALUES (@tenantId, @adminId, @courseId, @idempotencyKey, @requestHash, 'running', @createdAt)`,
+   138	      {
+   139	        tenantId: actor.tenantId,
+   140	        adminId: actor.adminId,
+   141	        courseId: course.id,
+   142	        idempotencyKey,
+   143	        requestHash,
+   144	        createdAt: startedAt,
+   145	      },
+   146	    ).lastInsertRowid;
+   147	
+   148	    const results = [];
+   149	    const summary = { total: 0, issued: 0, skipped: 0, failed: 0 };
+   150	
+   151	    for (const row of loadRoster(db, actor.tenantId, course.id)) {
+   152	      const base = { learnerId: row.learner_id, learnerName: row.learner_name, enrollmentId: row.enrollment_id };
+   153	      const verdict = classifyEnrollment(row);
+   154	      summary.total += 1;
+   155	
+   156	      if (!verdict.eligible) {
+   157	        summary.skipped += 1;
+   158	        const skipped = { ...base, outcome: 'skipped', reason: verdict.reason, message: verdict.message };
+   159	        if (row.certificate_id !== null) {
+   160	          skipped.certificateId = row.certificate_id;
+   161	          skipped.serialNumber = row.serial_number;
+   162	        }
+   163	        results.push(skipped);
+   164	        continue;
+   165	      }
+   166	
+   167	      try {
+   168	        // Each learner gets a SAVEPOINT: if issuing fails for one of them, only that learner's
+   169	        // partial writes are undone and reported as "failed"; everyone else is unaffected.
+   170	        // (`hooks` are test seams: they let a test make issuing fail before or after the writes.)
+   171	        const certificate = db.transaction(() => {
+   172	          const learner = { id: row.learner_id, name: row.learner_name };
+   173	          hooks.beforeIssue?.({ learner, course, tenant });
+   174	          const issued = issueCertificate(db, {
+   175	            tenant,
+   176	            actor,
+   177	            course,
+   178	            learner,
+   179	            enrollmentId: row.enrollment_id,
+   180	            issuedAt: startedAt,
+   181	            bulkOperationId: operationId,
+   182	            auditDetails: { enrollmentId: row.enrollment_id, idempotencyKey },
+   183	          });
+   184	          hooks.afterIssue?.({ learner, course, tenant, certificate: issued });
+   185	          return issued;
+   186	        });
+   187	        summary.issued += 1;
+   188	        results.push({
+   189	          ...base,
+   190	          outcome: 'issued',
+   191	          certificateId: certificate.id,
+   192	          serialNumber: certificate.serialNumber,
+   193	          issuedAt: certificate.issuedAt,
+   194	          issuedLocal: localDateTime(certificate.issuedAt, actor.timezone),
+   195	        });
+   196	      } catch (err) {
+   197	        if (err instanceof TransactionAbortedError) throw err; // nothing can be salvaged; fail the request
+   198	        // The cause is for the operator: the first failure of an operation is logged in full, every
+   199	        // further one in a single line. (When a whole roster fails for the same reason, thousands
+   200	        // of identical stack traces would be written while the write lock is held.)
+   201	        const failure = `[bulk-issue] operation ${operationId}: learner ${row.learner_id} failed:`;
+   202	        if (summary.failed === 0) logger.error(failure, err);
+   203	        else logger.error(`${failure} ${err?.message ?? err}`);
+   204	        summary.failed += 1;
+   205	        results.push({ ...base, outcome: 'failed', reason: 'issue_failed', message: FAILURE_MESSAGE });
+   206	      }
+   207	    }
+   208	
+   209	    // 4. Store the response with the operation so every retry gets the identical answer.
+   210	    const status = 201;
+   211	    const completedAt = now().toISOString();
+   212	    const responseBody = JSON.stringify({
+   213	      id: operationId,
+   214	      status: 'completed',
+   215	      course,
+   216	      idempotencyKey,
+   217	      requestedBy: actor.email,
+   218	      tenant: { name: actor.tenantName, timezone: actor.timezone },
+   219	      createdAt: startedAt,
+   220	      completedAt,
+   221	      summary,
+   222	      results,
+   223	    });
+   224	    db.run(
+   225	      `UPDATE bulk_issue_operations
+   226	          SET status = 'completed', issued_count = @issued, skipped_count = @skipped, failed_count = @failed,
+   227	              response_status = @status, response_body = @body, completed_at = @completedAt
+   228	        WHERE id = @operationId`,
+   229	      {
+   230	        issued: summary.issued,
+   231	        skipped: summary.skipped,
+   232	        failed: summary.failed,
+   233	        status,
+   234	        body: responseBody,
+   235	        completedAt,
+   236	        operationId,
+   237	      },
+   238	    );
+   239	
+   240	    return { status, body: responseBody, replayed: false, operationId };
+   241	  }, { whileWaiting });
+   242	}
+   243	
+   244	/** Stored result of a past operation (same JSON that the POST returned). 404 across tenants. */
+   245	export function getBulkOperation(db, actor, operationId) {
+   246	  const row =
+   247	    operationId === null
+   248	      ? undefined
+   249	      : db.get(
+   250	          `SELECT response_body FROM bulk_issue_operations
+   251	            WHERE id = @operationId AND tenant_id = @tenantId AND status = 'completed'`,
+   252	          { operationId, tenantId: actor.tenantId },
+   253	        );
+   254	  if (!row) throw notFound('Bulk issue operation');
+   255	  return row.response_body;
+   256	}
+   257	
+   258	/** Most recent operations of the tenant, without the per-learner detail. */
+   259	export function listBulkOperations(db, actor, { limit = 10 } = {}) {
+   260	  return db
+   261	    .all(
+   262	      `SELECT o.id, o.course_id, c.title AS course_title, o.idempotency_key, o.issued_count, o.skipped_count,
+   263	              o.failed_count, o.created_at, a.email AS requested_by
+   264	         FROM bulk_issue_operations o
+   265	         JOIN courses c ON c.id = o.course_id
+   266	         JOIN admins a ON a.id = o.actor_admin_id
+   267	        WHERE o.tenant_id = @tenantId AND o.status = 'completed'
+   268	        ORDER BY o.id DESC
+   269	        LIMIT @limit`,
+   270	      { tenantId: actor.tenantId, limit },
+   271	    )
+   272	    .map((row) => ({
+   273	      id: row.id,
+   274	      status: 'completed',
+   275	      course: { id: row.course_id, title: row.course_title },
+   276	      idempotencyKey: row.idempotency_key,
+   277	      requestedBy: row.requested_by,
+   278	      createdAt: row.created_at,
+   279	      createdLocal: localDateTime(row.created_at, actor.timezone),
+   280	      summary: {
+   281	        total: row.issued_count + row.skipped_count + row.failed_count,
+   282	        issued: row.issued_count,
+   283	        skipped: row.skipped_count,
+   284	        failed: row.failed_count,
+   285	      },
+   286	    }));
+   287	}
+=================== services/certificates.js
+     1	/**
+     2	 * Certificate queries: list, detail, revocation and the streaming CSV export.
+     3	 *
+     4	 * The list endpoint and the export share one filter + ordering builder, so an export always
+     5	 * contains exactly the rows (and the order) the admin is looking at.
+     6	 */
+     7	import { csvRow } from '../lib/csv.js';
+     8	import { badRequest, notFound } from '../lib/errors.js';
+     9	import { assertPlainText, queryInteger, queryString, textLength } from '../lib/params.js';
+    10	import { foldText } from '../lib/text.js';
+    11	import { createLocalDateTimeFormatter, localDateTime, utcOffset } from '../lib/time.js';
+    12	import { createTurnQueue } from '../lib/turns.js';
+    13	import { AUDIT_ACTIONS, revokeCertificate } from './ledger.js';
+    14	
+    15	export const DEFAULT_PAGE_SIZE = 25;
+    16	export const MAX_PAGE_SIZE = 100;
+    17	const MAX_REASON_LENGTH = 500;
+    18	
+    19	/**
+    20	 * Sort keys. Every ordering ends in `id`, so rows with equal sort values always come back in the
+    21	 * same order - pagination never skips or repeats a row and two exports of the same data are
+    22	 * byte-identical.
+    23	 *
+    24	 * "issued" sorts by the tenant-local calendar date first (not the UTC date), then by the exact
+    25	 * instant so a single day reads chronologically, then by id.
+    26	 *
+    27	 * "learner" and "course" sort by the folded name (lib/text.js), i.e. ignoring case and accents:
+    28	 * "álvarez", "Alvarez" and "ALVAREZ" sort together instead of the accented one landing after "z".
+    29	 */
+    30	const SORTS = {
+    31	  issued: (dir) => `c.issued_local_date ${dir}, c.issued_at ${dir}, c.id ${dir}`,
+    32	  learner: (dir) => `c.learner_name_key ${dir}, c.id ${dir}`,
+    33	  course: (dir) => `c.course_title_key ${dir}, c.id ${dir}`,
+    34	  serial: (dir) => `c.serial_number ${dir}, c.id ${dir}`,
+    35	  status: (dir) => `c.status ${dir}, c.id ${dir}`,
+    36	};
+    37	
+    38	/**
+    39	 * The index that already stores each ordering. List and export name it explicitly (INDEXED BY),
+    40	 * so SQLite always walks the index in order - it can stop after one page, and an export starts
+    41	 * streaming immediately instead of first sorting the whole tenant, whatever the planner statistics say.
+    42	 */
+    43	const SORT_INDEXES = {
+    44	  issued: 'idx_certificates_issued',
+    45	  learner: 'idx_certificates_learner',
+    46	  course: 'idx_certificates_course',
+    47	  serial: 'idx_certificates_serial',
+    48	  status: 'idx_certificates_status',
+    49	};
+    50	
+    51	/** Accepted names of each sort key: exactly these, in camelCase, snake_case or kebab-case, any letter case. */
+    52	const SORT_NAMES = {
+    53	  issued: ['issued', 'issuedAt', 'issueDate', 'issuedDate', 'issuedLocal', 'issuedLocalDate', 'date'],
+    54	  learner: ['learner', 'learnerName', 'name'],
+    55	  course: ['course', 'courseTitle'],
+    56	  serial: ['serial', 'serialNumber'],
+    57	  status: ['status'],
+    58	};
+    59	
+    60	// A Map, not a plain object: "constructor" or "toString" must not look like known names.
+    61	const SORT_ALIASES = new Map();
+    62	for (const [sort, names] of Object.entries(SORT_NAMES)) {
+    63	  for (const name of names) {
+    64	    const words = name.replace(/[A-Z]/g, (letter) => ` ${letter.toLowerCase()}`).split(' ');
+    65	    for (const separator of ['', '_', '-']) SORT_ALIASES.set(words.join(separator), sort);
+    66	  }
+    67	}
+    68	
+    69	const DEFAULT_ORDER = { issued: 'desc', learner: 'asc', course: 'asc', serial: 'asc', status: 'asc' };
+    70	const STATUSES = ['all', 'active', 'revoked'];
+    71	const KNOWN_AUDIT_ACTIONS = Object.values(AUDIT_ACTIONS);
+    72	
+    73	/**
+    74	 * Validates list/export query parameters. Unknown values are rejected rather than silently
+    75	 * ignored; a parameter that is present but blank counts as not given.
+    76	 *
+    77	 * The export has no pages (`paginate: false`): it does not look at `page` and `pageSize`, so the
+    78	 * query string of a list request can be reused for the export of the same rows as it is.
+    79	 */
+    80	export function parseListQuery(query, { paginate = true } = {}) {
+    81	  const q = queryString(query, ['q', 'search'], { maxLength: 100 }) ?? '';
+    82	
+    83	  const status = (queryString(query, ['status']) ?? 'all').toLowerCase();
+    84	  if (!STATUSES.includes(status)) throw badRequest(`"status" must be one of: ${STATUSES.join(', ')}`);
+    85	
+    86	  let sortText = (queryString(query, ['sort', 'sortBy']) ?? 'issued').toLowerCase();
+    87	  let order = queryString(query, ['order', 'dir', 'direction', 'sortOrder'])?.toLowerCase();
+    88	  if (sortText.startsWith('-')) {
+    89	    sortText = sortText.slice(1);
+    90	    order ??= 'desc';
+    91	  }
+    92	  const sort = SORT_ALIASES.get(sortText);
+    93	  if (!sort) throw badRequest(`"sort" must be one of: ${Object.keys(SORTS).join(', ')}`);
+    94	  order ??= DEFAULT_ORDER[sort];
+    95	  if (order !== 'asc' && order !== 'desc') throw badRequest('"order" must be "asc" or "desc"');
+    96	
+    97	  const options = { q, status, sort, order };
+    98	  if (paginate) {
+    99	    options.page = queryInteger(query, ['page'], { min: 1, max: 1_000_000, fallback: 1 });
+   100	    options.pageSize = queryInteger(query, ['pageSize', 'page_size', 'per_page', 'limit'], {
+   101	      min: 1,
+   102	      max: MAX_PAGE_SIZE,
+   103	      fallback: DEFAULT_PAGE_SIZE,
+   104	    });
+   105	  }
+   106	  return options;
+   107	}
+   108	
+   109	/**
+   110	 * The filter shared by list, count and export, in two parts:
+   111	 *   - `tenant`: the tenant predicate. It comes from the actor and is always present; nothing the
+   112	 *     client sends can widen it.
+   113	 *   - `narrowing`: what the search text and the status filter add (possibly nothing).
+   114	 *
+   115	 * The search looks for the text anywhere in the learner name or the serial number, ignoring case
+   116	 * and accents: the stored name key and the search text are folded the same way (lib/text.js), so a
+   117	 * plain substring test on the key does the job. Serial numbers are ASCII, for which LIKE is
+   118	 * case-insensitive by itself; "%" and "_" in the search text are escaped and stand for themselves.
+   119	 */
+   120	const escapeLike = (text) => text.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+   121	
+   122	function buildFilter(actor, { q, status }) {
+   123	  const tenant = 'c.tenant_id = @tenantId';
+   124	  const params = { tenantId: actor.tenantId };
+   125	  const narrowing = [];
+   126	  if (q) {
+   127	    const needle = foldText(q);
+   128	    if (needle) {
+   129	      narrowing.push("(instr(c.learner_name_key, @needle) > 0 OR c.serial_number LIKE @serialPattern ESCAPE '\\')");
+   130	      params.needle = needle;
+   131	      params.serialPattern = `%${escapeLike(needle)}%`;
+   132	    } else {
+   133	      narrowing.push('0'); // nothing searchable is left of the text (it was accents only): no row matches
+   134	    }
+   135	  }
+   136	  if (status !== 'all') {
+   137	    narrowing.push('c.status = @status');
+   138	    params.status = status;
+   139	  }
+   140	  return { tenant, narrowing, searching: Boolean(q), where: [tenant, ...narrowing].join(' AND '), params };
+   141	}
+   142	
+   143	const orderBy = ({ sort, order }) => SORTS[sort](order === 'desc' ? 'DESC' : 'ASC');
+   144	const orderedSource = ({ sort }) => `certificates c INDEXED BY ${SORT_INDEXES[sort]}`;
+   145	
+   146	function presentListItem(row, timeZone) {
+   147	  return {
+   148	    id: row.id,
+   149	    serialNumber: row.serial_number,
+   150	    learnerId: row.learner_id,
+   151	    learnerName: row.learner_name,
+   152	    courseId: row.course_id,
+   153	    courseTitle: row.course_title,
+   154	    status: row.status,
+   155	    issuedAt: row.issued_at,
+   156	    issuedLocal: localDateTime(row.issued_at, timeZone),
+   157	    issuedLocalDate: row.issued_local_date,
+   158	  };
+   159	}
+   160	
+   161	export function listCertificates(db, actor, options) {
+   162	  const { where, params, searching } = buildFilter(actor, options);
+   163	  const { page, pageSize } = options;
+   164	  // A search has to look at every certificate of the tenant to count its matches. The learner
+   165	  // index holds all the columns the filter reads, so the count never touches the table itself.
+   166	  const countSource = searching ? `certificates c INDEXED BY ${SORT_INDEXES.learner}` : 'certificates c';
+   167	
+   168	  // Count and page are read inside one snapshot so "total" always matches the rows returned.
+   169	  const { total, rows } = db.transaction(
+   170	    () => ({
+   171	      total: db.get(`SELECT COUNT(*) AS n FROM ${countSource} WHERE ${where}`, params).n,
+   172	      rows: db.all(
+   173	        `SELECT c.id, c.serial_number, c.learner_id, c.learner_name, c.course_id, c.course_title,
+   174	                c.status, c.issued_at, c.issued_local_date
+   175	           FROM ${orderedSource(options)}
+   176	          WHERE ${where}
+   177	          ORDER BY ${orderBy(options)}
+   178	          LIMIT @limit OFFSET @offset`,
+   179	        { ...params, limit: pageSize, offset: (page - 1) * pageSize },
+   180	      ),
+   181	    }),
+   182	    { immediate: false },
+   183	  );
+   184	
+   185	  return {
+   186	    items: rows.map((row) => presentListItem(row, actor.timezone)),
+   187	    page,
+   188	    pageSize,
+   189	    total,
+   190	    totalPages: Math.max(1, Math.ceil(total / pageSize)),
+   191	    sort: options.sort,
+   192	    order: options.order,
+   193	    q: options.q,
+   194	    status: options.status,
+   195	    tenant: { name: actor.tenantName, timezone: actor.timezone },
+   196	  };
+   197	}
+   198	
+   199	function presentAuditEvent(row, timeZone) {
+   200	  return {
+   201	    id: row.id,
+   202	    action: row.action,
+   203	    actorEmail: row.actor_email,
+   204	    certificateId: row.certificate_id,
+   205	    bulkOperationId: row.bulk_operation_id,
+   206	    createdAt: row.created_at,
+   207	    createdLocal: localDateTime(row.created_at, timeZone),
+   208	    details: JSON.parse(row.details),
+   209	  };
+   210	}
+   211	
+   212	/** Full certificate record including its audit trail; throws 404 for other tenants' certificates. */
+   213	export function getCertificate(db, actor, certificateId) {
+   214	  const row =
+   215	    certificateId === null
+   216	      ? undefined
+   217	      : db.get(
+   218	          `SELECT c.*, issuer.email AS issued_by_email, revoker.email AS revoked_by_email
+   219	             FROM certificates c
+   220	             LEFT JOIN admins issuer  ON issuer.id  = c.issued_by_admin_id
+   221	             LEFT JOIN admins revoker ON revoker.id = c.revoked_by_admin_id
+   222	            WHERE c.id = @certificateId AND c.tenant_id = @tenantId`,
+   223	          { certificateId, tenantId: actor.tenantId },
+   224	        );
+   225	  if (!row) throw notFound('Certificate');
+   226	
+   227	  const timeZone = actor.timezone;
+   228	  const auditEvents = db.all(
+   229	    'SELECT * FROM audit_events WHERE certificate_id = @certificateId AND tenant_id = @tenantId ORDER BY id',
+   230	    { certificateId, tenantId: actor.tenantId },
+   231	  );
+   232	
+   233	  return {
+   234	    id: row.id,
+   235	    serialNumber: row.serial_number,
+   236	    learnerId: row.learner_id,
+   237	    learnerName: row.learner_name,
+   238	    courseId: row.course_id,
+   239	    courseTitle: row.course_title,
+   240	    status: row.status,
+   241	    issuedAt: row.issued_at,
+   242	    issuedLocal: localDateTime(row.issued_at, timeZone),
+   243	    issuedLocalDate: row.issued_local_date,
+   244	    issuedUtcOffset: utcOffset(row.issued_at, timeZone),
+   245	    issuedBy: row.issued_by_email,
+   246	    bulkOperationId: row.bulk_operation_id,
+   247	    revokedAt: row.revoked_at,
+   248	    revokedLocal: row.revoked_at ? localDateTime(row.revoked_at, timeZone) : null,
+   249	    revokedBy: row.revoked_by_email,
+   250	    revocationReason: row.revocation_reason,
+   251	    tenant: { name: actor.tenantName, timezone: timeZone },
+   252	    auditEvents: auditEvents.map((event) => presentAuditEvent(event, timeZone)),
+   253	  };
+   254	}
+   255	
+   256	function parseRevocationReason(body) {
+   257	  if (body === undefined || body === null) return null;
+   258	  if (typeof body !== 'object' || Array.isArray(body)) throw badRequest('Request body must be a JSON object');
+   259	  const { reason } = body;
+   260	  if (reason === undefined || reason === null) return null;
+   261	  if (typeof reason !== 'string') throw badRequest('"reason" must be a string');
+   262	  assertPlainText(reason, '"reason"', { allowLineBreaks: true });
+   263	  const text = reason.trim();
+   264	  if (textLength(text) > MAX_REASON_LENGTH) throw badRequest(`"reason" must be at most ${MAX_REASON_LENGTH} characters`);
+   265	  return text || null;
+   266	}
+   267	
+   268	/**
+   269	 * Revokes a certificate. Idempotent: revoking an already revoked certificate succeeds, changes
+   270	 * nothing and writes no audit event (`alreadyRevoked: true` tells the caller it was a no-op).
+   271	 */
+   272	export async function revoke(db, actor, certificateId, body, { now = () => new Date() } = {}) {
+   273	  const reason = parseRevocationReason(body);
+   274	
+   275	  // Already revoked: there is nothing to write, so the answer needs no write lock. Returns
+   276	  // undefined while the certificate is still active.
+   277	  const answerIfAlreadyRevoked = () => {
+   278	    const current =
+   279	      certificateId === null
+   280	        ? undefined
+   281	        : db.get('SELECT status FROM certificates WHERE id = @certificateId AND tenant_id = @tenantId', {
+   282	            certificateId,
+   283	            tenantId: actor.tenantId,
+   284	          });
+   285	    if (!current) throw notFound('Certificate');
+   286	    return current.status === 'revoked' ? { ...getCertificate(db, actor, certificateId), alreadyRevoked: true } : undefined;
+   287	  };
+   288	
+   289	  const settled = answerIfAlreadyRevoked();
+   290	  if (settled) return settled;
+   291	
+   292	  return db.writeTransaction(
+   293	    () => {
+   294	      // The conditional UPDATE inside decides under the lock; a racing revoke simply finds nothing to change.
+   295	      const changed = revokeCertificate(db, {
+   296	        tenantId: actor.tenantId,
+   297	        certificateId,
+   298	        actor,
+   299	        revokedAt: now(),
+   300	        reason,
+   301	      });
+   302	      return { ...getCertificate(db, actor, certificateId), alreadyRevoked: !changed };
+   303	    },
+   304	    // Someone else may revoke the certificate while this request is still queueing for the lock;
+   305	    // from then on the answer is known, however long the lock stays taken.
+   306	    { whileWaiting: answerIfAlreadyRevoked },
+   307	  );
+   308	}
+   309	
+   310	/** Audit events of the actor's tenant, newest first, optionally narrowed down. */
+   311	export function listAuditEvents(db, actor, query) {
+   312	  const page = queryInteger(query, ['page'], { min: 1, max: 1_000_000, fallback: 1 });
+   313	  const pageSize = queryInteger(query, ['pageSize', 'page_size', 'per_page', 'limit'], {
+   314	    min: 1,
+   315	    max: MAX_PAGE_SIZE,
+   316	    fallback: DEFAULT_PAGE_SIZE,
+   317	  });
+   318	  const clauses = ['tenant_id = @tenantId'];
+   319	  const params = { tenantId: actor.tenantId };
+   320	
+   321	  const certificateId = queryInteger(query, ['certificateId', 'certificate_id'], { min: 1, max: 1e15, fallback: null });
+   322	  if (certificateId !== null) {
+   323	    clauses.push('certificate_id = @certificateId');
+   324	    params.certificateId = certificateId;
+   325	  }
+   326	  const bulkOperationId = queryInteger(query, ['bulkOperationId', 'bulk_operation_id', 'operationId'], {
+   327	    min: 1,
+   328	    max: 1e15,
+   329	    fallback: null,
+   330	  });
+   331	  if (bulkOperationId !== null) {
+   332	    clauses.push('bulk_operation_id = @bulkOperationId');
+   333	    params.bulkOperationId = bulkOperationId;
+   334	  }
+   335	  const action = queryString(query, ['action'], { maxLength: 64 });
+   336	  if (action !== undefined) {
+   337	    if (!KNOWN_AUDIT_ACTIONS.includes(action)) throw badRequest(`"action" must be one of: ${KNOWN_AUDIT_ACTIONS.join(', ')}`);
+   338	    clauses.push('action = @action');
+   339	    params.action = action;
+   340	  }
+   341	
+   342	  const where = clauses.join(' AND ');
+   343	  const total = db.get(`SELECT COUNT(*) AS n FROM audit_events WHERE ${where}`, params).n;
+   344	  const rows = db.all(`SELECT * FROM audit_events WHERE ${where} ORDER BY id DESC LIMIT @limit OFFSET @offset`, {
+   345	    ...params,
+   346	    limit: pageSize,
+   347	    offset: (page - 1) * pageSize,
+   348	  });
+   349	  return {
+   350	    items: rows.map((row) => presentAuditEvent(row, actor.timezone)),
+   351	    page,
+   352	    pageSize,
+   353	    total,
+   354	    totalPages: Math.max(1, Math.ceil(total / pageSize)),
+   355	  };
+   356	}
+   357	
+   358	// ---------------------------------------------------------------------------------------------
+   359	// CSV export
+   360	// ---------------------------------------------------------------------------------------------
+   361	
+   362	/** Rows an export looks at in one step (matching the filter or not). */
+   363	export const EXPORT_BATCH_ROWS = 500;
+   364	
+   365	/**
+   366	 * All exports of this process take their steps through one queue: one step per event-loop
+   367	 * iteration in total, not one per export, so the pause other requests see stays one step long
+   368	 * however many exports are running.
+   369	 */
+   370	const exportTurns = createTurnQueue();
+   371	
+   372	/**
+   373	 * Query + metadata for an export of everything the given list filters match (no pagination).
+   374	 *
+   375	 * Unlike the list query, the search/status filter is not part of WHERE: it is returned as a
+   376	 * column (`matches`) next to every row of the tenant, in the requested order. See
+   377	 * streamCsvExport for the reason.
+   378	 */
+   379	export function buildExportPlan(actor, options) {
+   380	  const { tenant, narrowing, params } = buildFilter(actor, options);
+   381	  const filtered = narrowing.length > 0;
+   382	  return {
+   383	    sql: `SELECT c.learner_name, c.course_title, c.serial_number, c.issued_at${filtered ? `, (${narrowing.join(' AND ')}) AS matches` : ''}
+   384	            FROM ${orderedSource(options)}
+   385	           WHERE ${tenant}
+   386	           ORDER BY ${orderBy(options)}`,
+   387	    params,
+   388	    filtered,
+   389	    timeZone: actor.timezone,
+   390	    header: ['Learner Name', 'Course Title', 'Serial Number', `Issue Date (${actor.timezone})`],
+   391	  };
+   392	}
+   393	
+   394	/**
+   395	 * Streams the export as CSV text chunks.
+   396	 *
+   397	 * `openReader` opens a dedicated connection for this export; the export closes it again. The
+   398	 * whole export runs inside one read transaction on it, i.e. against a single consistent snapshot,
+   399	 * while the server's main connection keeps serving other requests (WAL readers never block each
+   400	 * other or the writer).
+   401	 *
+   402	 * SQLite calls are synchronous, so the export must never do much in one go. It walks the tenant's
+   403	 * rows in the requested order in steps of `batchRows` rows it has LOOKED AT, and waits for its
+   404	 * turn on the event loop before every step (lib/turns.js); opening the connection is part of the
+   405	 * first step. That is why the filter is evaluated as a column instead of in WHERE: with a filter
+   406	 * in WHERE, fetching "the next matching row" can mean scanning the rest of the table in a single
+   407	 * call when few rows match, and every other request would wait for that scan. This way a step is
+   408	 * the same small amount of work whether the filter matches every row or none.
+   409	 *
+   410	 * Memory stays flat: nothing but the current batch is ever buffered, and the consumer's
+   411	 * back-pressure decides how fast the next batch is fetched.
+   412	 *
+   413	 * `signal` (optional) abandons the export: it stops before its next step instead of reading on
+   414	 * for a client that has gone. An abandoned export simply ends; it does not throw.
+   415	 */
+   416	export async function* streamCsvExport(openReader, plan, { batchRows = EXPORT_BATCH_ROWS, signal } = {}) {
+   417	  const formatIssued = createLocalDateTimeFormatter(plan.timeZone);
+   418	  let reader = null;
+   419	  let rows = null;
+   420	  try {
+   421	    // The header travels with the first batch: by the time the first chunk exists the query has
+   422	    // run and the snapshot is pinned, so a failure to start can still be reported as a proper error.
+   423	    let chunk = csvRow(plan.header);
+   424	
+   425	    for (;;) {
+   426	      await exportTurns.next();
+   427	      if (signal?.aborted) return;
+   428	      if (!reader) {
+   429	        reader = openReader();
+   430	        reader.exec('BEGIN');
+   431	        rows = reader.iterate(plan.sql, plan.params);
+   432	      }
+   433	      let done = false;
+   434	      for (let i = 0; i < batchRows; i += 1) {
+   435	        const next = rows.next();
+   436	        if (next.done) {
+   437	          done = true;
+   438	          break;
+   439	        }
+   440	        const row = next.value;
+   441	        if (plan.filtered && !row.matches) continue;
+   442	        chunk += csvRow([row.learner_name, row.course_title, row.serial_number, formatIssued(row.issued_at)]);
+   443	      }
+   444	      if (chunk) yield chunk;
+   445	      if (done) break;
+   446	      chunk = '';
+   447	    }
+   448	  } finally {
+   449	    // Runs on completion, on error, and when the export is abandoned mid-download.
+   450	    try {
+   451	      rows?.return?.();
+   452	    } catch {
+   453	      // statement already finished
+   454	    }
+   455	    if (reader) {
+   456	      try {
+   457	        reader.exec('ROLLBACK');
+   458	      } catch {
+   459	        // no transaction left to close
+   460	      }
+   461	      reader.close();
+   462	    }
+   463	  }
+   464	}
+   465	
+   466	export function exportFileName(actor, now = new Date()) {
+   467	  const tenant = actor.tenantName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'tenant';
+   468	  const stamp = localDateTime(now, actor.timezone).replace(/[-:]/g, '').replace(' ', '-');
+   469	  return `certificates-${tenant}-${stamp}.csv`;
+   470	}

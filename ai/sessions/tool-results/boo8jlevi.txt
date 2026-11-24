@@ -1,0 +1,231 @@
+test/bulk-issue.test.jsx > Bulk issue: preview > lists the courses of the tenant and asks to choose one
+test/detail-revoke.test.jsx > Certificate detail > shows serial number, learner, course, the issue date in the tenant time zone, status and the audit trail
+test/detail-revoke.test.jsx > Certificate detail > shows another tenant's certificate in that tenant's time zone
+test/bulk-issue.test.jsx > Bulk issue: preview > previews the roster: who is eligible and why the others will be skipped
+test/bulk-issue.test.jsx > Bulk issue: preview > offers nothing to issue when nobody is eligible
+test/bulk-issue.test.jsx > Bulk issue: preview > shows the error state when the roster cannot be loaded and retries
+test/detail-revoke.test.jsx > Certificate detail > shows a revoked certificate with who revoked it, when and why - and without a revoke button
+test/regressions.test.jsx > "View outcomes" shows the operation selected last (item C) > item C: a slow answer for an earlier choice never replaces the operation that was opened last
+test/bulk-issue.test.jsx > Bulk issue: a roster of several pages > pages through the learners, and starts on page 1 again when another course is chosen
+test/detail-revoke.test.jsx > Certificate detail > opens from a row of the list and closes again
+test/detail-revoke.test.jsx > Certificate detail > shows "Certificate not found" for an unknown id
+test/detail-revoke.test.jsx > Certificate detail > shows "Certificate not found" for another tenant's id
+test/detail-revoke.test.jsx > Certificate detail > shows "Certificate not found" for another tenant's id (the other way round)
+test/detail-revoke.test.jsx > Certificate detail > opens no drawer for a link that is not a certificate id
+test/regressions.test.jsx > "View outcomes" shows the operation selected last (item C) > item C: opening the operation whose result is already on screen renders no second panel
+test/bulk-issue.test.jsx > Bulk issue: one submission, visible status > sends exactly one POST for a double click and locks the form while the request is in flight
+test/bulk-issue.test.jsx > Bulk issue: one submission, visible status > sends exactly one POST for Enter followed by a click
+test/detail-revoke.test.jsx > Certificate detail > shows the error state when the certificate cannot be loaded and retries
+test/detail-revoke.test.jsx > Certificate detail > closes the drawer on an actor switch instead of asking the other tenant for this id
+test/bulk-issue.test.jsx > Bulk issue: one submission, visible status > sends the course, a fresh idempotency key and the actor
+test/regressions.test.jsx > "View outcomes" shows the operation selected last (item C) > item C: a past operation shown below a run result does not repeat the id "result-heading"
+test/bulk-issue.test.jsx > Bulk issue: result > shows the summary and the outcome of every learner: issued, or skipped with its reason
+test/bulk-issue.test.jsx > Bulk issue: result > filters the outcomes and can be dismissed
+test/detail-revoke.test.jsx > Revocation > asks for confirmation first: opening the dialog, Cancel and Escape send nothing
+test/regressions.test.jsx > "View outcomes" shows the operation selected last (item C) > item C: after switching to another operation, the one opened before is not rendered again - not even once
+test/detail-revoke.test.jsx > Revocation > revokes after confirming: one POST even for a double click, then drawer and list show the new state
+test/detail-revoke.test.jsx > Revocation > sends no reason when none was given
+test/regressions.test.jsx > "View outcomes" shows the operation selected last (item C) > item C: an operation opened while the retry that returns it is in flight does not pop up when the result is dismissed
+test/detail-revoke.test.jsx > Revocation > says so when the certificate had already been revoked in the meantime
+test/detail-revoke.test.jsx > Revocation > starts afresh for every certificate: what happened to one is not carried over to the next one opened
+test/regressions.test.jsx > "View outcomes" shows the operation selected last (item C) > item C: starting a bulk issue closes the past operation that was open, so only the new result is shown
+test/regressions.test.jsx > "View outcomes" shows the operation selected last (item C) > item C: "View outcomes" for the result that is already on screen moves the focus to its heading
+test/bulk-issue.test.jsx > Bulk issue: result > shows the first 200 outcomes of a long result, and all of them on request
+test/bulk-issue.test.jsx > Bulk issue: result > reports a learner whose certificate could not be issued as failed, next to the others
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): an object of another shape > item D: certificate list
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): an object of another shape > item D: certificate list, while rows are on screen
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): an object of another shape > item D: certificate detail
+test/bulk-issue.test.jsx > Bulk issue: when the answer is lost > network error: says the outcome is unknown, and "Retry safely" re-sends the same Idempotency-Key
+test/bulk-issue.test.jsx > Bulk issue: when the answer is lost > HTTP 500: unknown outcome, same key on retry, replay note
+test/detail-revoke.test.jsx > Revocation > keeps "was not revoked" for a definite failure: 503 database_busy (nothing was written)
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): an object of another shape > item D: courses
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): an object of another shape > item D: roster
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): an object of another shape > item D: operation history
+test/bulk-issue.test.jsx > Bulk issue: when the answer is lost > HTTP 502 from a gateway with an HTML body: unknown outcome
+test/bulk-issue.test.jsx > Bulk issue: when the answer is lost > item B: a 201 whose JSON arrives truncated is an unknown outcome, never "was rejected"
+test/detail-revoke.test.jsx > Revocation > keeps "was not revoked" for a definite failure: a 400
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): an object of another shape > item D: a single operation
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): an object of another shape > item D: actor list
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): null > item D: certificate list
+test/bulk-issue.test.jsx > Bulk issue: when the answer is lost > item B: a 201 whose connection is cut after the headers is an unknown outcome
+test/bulk-issue.test.jsx > Bulk issue: when the answer is lost > item D: a 201 with JSON of an unexpected shape is an unknown outcome as well
+test/bulk-issue.test.jsx > Bulk issue: when the answer is lost > item B: an exception that is not an ApiError is treated as an unknown outcome too
+test/detail-revoke.test.jsx > Revocation > keeps "was not revoked" for a definite failure: a 404
+test/detail-revoke.test.jsx > Revocation with an unknown outcome (item E) > item E: a lost answer is reported as unknown, and drawer and list are refreshed to the real state (revoked)
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): null > item D: certificate list, while rows are on screen
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): null > item D: certificate detail
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): null > item D: courses
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): null > item D: roster
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): null > item D: operation history
+test/bulk-issue.test.jsx > Bulk issue: when the answer is lost > 503 database_busy: says the bulk issue has not run yet; the retry keeps the key and then runs for the first time
+test/bulk-issue.test.jsx > Bulk issue: when the answer is lost > keeps the same key over several retries
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): null > item D: a single operation
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): null > item D: actor list
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): a list instead of an object > item D: certificate list
+test/bulk-issue.test.jsx > Bulk issue: when the answer is lost > HTTP 409: says the bulk issue was rejected, offers no retry, and the next attempt uses a new key
+test/bulk-issue.test.jsx > Bulk issue: when the answer is lost > HTTP 400: says the bulk issue was rejected, offers no retry, and the next attempt uses a new key
+test/detail-revoke.test.jsx > Revocation with an unknown outcome (item E) > item E: trying again while the outcome is unknown is safe - the repeat finds the certificate revoked already
+test/detail-revoke.test.jsx > Revocation with an unknown outcome (item E) > item E: while the refresh is still running, the old copy is not shown as current - also after Cancel
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): a list instead of an object > item D: certificate list, while rows are on screen
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): a list instead of an object > item D: certificate detail
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): a list instead of an object > item D: courses
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): a list instead of an object > item D: roster
+test/bulk-issue.test.jsx > Bulk issue: when the answer is lost > HTTP 404: says the bulk issue was rejected, offers no retry, and the next attempt uses a new key
+test/bulk-issue.test.jsx > Bulk issue: when the answer is lost > forgets the retry prompt when it is dismissed; the next attempt is a new operation with a new key
+test/detail-revoke.test.jsx > Revocation with an unknown outcome (item E) > item E: when the request never reached the server, the refresh shows it is still active and the retry revokes
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): a list instead of an object > item D: operation history
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): a list instead of an object > item D: a single operation
+test/regressions.test.jsx > A 200 answer with unexpected JSON ends in the error state (item D): a list instead of an object > item D: actor list
+test/regressions.test.jsx > Answers that are almost right (item D) > item D: certificate list where items is not a list
+test/regressions.test.jsx > Answers that are almost right (item D) > item D: certificate list where an item is not an object
+test/regressions.test.jsx > Answers that are almost right (item D) > item D: certificate list where the totals are missing
+test/detail-revoke.test.jsx > Revocation with an unknown outcome (item E) > item E: HTTP 500 is an unknown outcome as well
+test/detail-revoke.test.jsx > Revocation with an unknown outcome (item E) > item E: a 200 whose body arrives truncated is an unknown outcome as well
+test/detail-revoke.test.jsx > Revocation with an unknown outcome (item E) > item E: a 200 whose connection is cut after the headers is an unknown outcome as well
+test/bulk-issue.test.jsx > Bulk issue: the attempt survives in-app navigation (item A) > item A: leaving the tab and coming back during a pending request keeps the lock, the status, the course and the key
+test/regressions.test.jsx > Answers that are almost right (item D) > item D: an actor without a tenant, a certificate without an audit trail, a roster without totals
+test/regressions.test.jsx > A well-formed answer about another record (item D) > item D: a roster whose course has no id ends in the error state instead of loading for ever
+test/regressions.test.jsx > A well-formed answer about another record (item D) > item D: a roster of another course ends in the error state instead of loading for ever
+test/bulk-issue.test.jsx > Bulk issue: the attempt survives in-app navigation (item A) > item A: a request that finishes while the admin is on another tab shows its result on return
+test/detail-revoke.test.jsx > Revocation with an unknown outcome (item E) > item E: a 200 with JSON of an unexpected shape is an unknown outcome as well
+test/regressions.test.jsx > A well-formed answer about another record (item D) > item D: a roster whose course id is text instead of a number ends in the error state instead of loading for ever
+test/regressions.test.jsx > A well-formed answer about another record (item D) > item D: a course list whose ids are text ends in the error state - no roster could ever match such a course
+test/regressions.test.jsx > A well-formed answer about another record (item D) > item D: an operation answered with another id ends in the error state instead of loading for ever
+test/regressions.test.jsx > Top-level error boundary (item D) > item D: an unexpected render exception shows an error panel with a reload action, not an empty page
+test/bulk-issue.test.jsx > Bulk issue: the attempt survives in-app navigation (item A) > item A: a request that fails while the admin is away waits with "Retry safely" and the same key
+test/bulk-issue.test.jsx > Bulk issue: the attempt survives in-app navigation (item A) > item A: following a serial link out of the page and coming back keeps the pending attempt
+test/detail-revoke.test.jsx > Revocation with an unknown outcome (item E) > item E: when the refresh fails too, the dialog stays open, nothing claims "Active", and the retry still works
+test/regressions.test.jsx > Top-level error boundary (item D) > item D: on a deep link that cannot be displayed the panel also leads back to the certificate list
+test/regressions.test.jsx > Control characters in the search text (item F) > item F: a pasted tab is searched (and exported) as a single space instead of failing with HTTP 400
+test/bulk-issue.test.jsx > Bulk issue: the attempt survives in-app navigation (item A) > item A: a result on screen is still there after a tab round trip, until it is dismissed
+test/regressions.test.jsx > Control characters in the search text (item F) > item F: Enter sends the cleaned text at once - before the debounce could repair anything
+test/regressions.test.jsx > Control characters in the search text (item F) > item F: line breaks and other control characters become single spaces too, also through the debounce
+test/regressions.test.jsx > Control characters in the search text (item F) > item F: Export clicked right after pasting sends the cleaned text as well
+test/detail-revoke.test.jsx > Revocation with an unknown outcome (item E) > item E: after an unknown outcome, a 400 for the repeat is not reported as "was not revoked"
+test/bulk-issue.test.jsx > Bulk issue: the attempt survives in-app navigation (item A) > item A: the attempt belongs to its actor - never shown as another tenant, still locked on return
+test/bulk-issue.test.jsx > Bulk issue: the attempt survives in-app navigation (item A) > item A: switching the actor away and back during a pending request does not unlock the form
+test/regressions.test.jsx > An export in flight when its page goes away (item G) > item G: switching the actor aborts the export - no file of tenant A is saved while acting as tenant B
+test/detail-revoke.test.jsx > Revocation with an unknown outcome (item E) > item E: after an unknown outcome, 503 database_busy for the repeat is not reported as "was not revoked"
+test/regressions.test.jsx > An export in flight when its page goes away (item G) > item G: leaving the Certificates tab aborts the export as well, and nothing is saved later
+test/regressions.test.jsx > An export in flight when its page goes away (item G) > item G: opening and closing the detail drawer does not cancel a running export
+test/detail-revoke.test.jsx > Revocation with an unknown outcome (item E) > item E: the outcome stays open when the dialog is closed and opened again - still no "was not revoked"
+test/detail-revoke.test.jsx > Revocation with an unknown outcome (item E) > item E: once the server has said "revoked" the dialog keeps saying so, also when a later reload fails
+test/detail-revoke.test.jsx > Revoke dialog: focus and layout > hands the focus to the drawer when the dialog closes and the button that opened it is gone
+test/bulk-issue.test.jsx > Bulk issue: two actors, each with an operation of their own (item A) > item A: the other actor's own bulk issue leaves a pending attempt alone - still locked, same key, one POST
+test/detail-revoke.test.jsx > Revoke dialog: focus and layout > returns the focus to the Revoke button when the dialog is cancelled
+test/bulk-issue.test.jsx > Bulk issue: an attempt without a known outcome survives a page reload > brings a pending request back as "may or may not" with the same key when the server had carried the request out
+test/bulk-issue.test.jsx > Bulk issue: an attempt without a known outcome survives a page reload > brings a pending request back as "may or may not" with the same key when the server had not started on the request yet
+test/bulk-issue.test.jsx > Bulk issue: an attempt without a known outcome survives a page reload > brings a retry prompt back with its wording and its key: an unknown outcome
+test/bulk-issue.test.jsx > Bulk issue: an attempt without a known outcome survives a page reload > brings a retry prompt back with its wording and its key: a busy database
+test/detail-revoke.test.jsx > Revoke dialog: focus and layout > returns the focus to the Revoke button also when a reload behind the dialog has replaced it
+test/detail-revoke.test.jsx > Revoke dialog: focus and layout > keeps the focus in the drawer when the dialog is cancelled while the status is still being checked
+test/detail-revoke.test.jsx > Revoke dialog: focus and layout > after an unknown outcome that turned out revoked: focus on "Close", then on the drawer
+test/detail-revoke.test.jsx > Revoke dialog: focus and layout > brings the focus back into the dialog when a failed request has cost the button its focus
+test/bulk-issue.test.jsx > Bulk issue: an attempt without a known outcome survives a page reload > brings nothing back once the outcome is known: a result, a rejection, a dismissed prompt
+test/certificates.test.jsx > Certificate list > shows a loading state, then the certificates of the acting tenant
+test/certificates.test.jsx > Certificate list > shows the empty state of a tenant without certificates
+test/detail-revoke.test.jsx > Revoke dialog: focus and layout > leaves the focus where the admin put it inside the dialog
+test/detail-revoke.test.jsx > Revoke dialog: focus and layout > keeps title and buttons outside the part that scrolls, and the dialog inside the screen
+test/detail-revoke.test.jsx > Revoke dialog: focus and layout > scrolls the message of a failed attempt into view
+test/bulk-issue.test.jsx > Bulk issue: an attempt without a known outcome survives a page reload > brings the attempt back for its own actor only
+test/bulk-issue.test.jsx > Bulk issue: recent operations > lists earlier runs, newest first, and opens the outcomes of one of them
+test/bulk-issue.test.jsx > Bulk issue: recent operations > shows the error state when an operation cannot be loaded and retries
+test/certificates.test.jsx > Certificate list > shows the empty state of a search without matches and can clear the filters
+test/certificates.test.jsx > Certificate list > shows the error state for a failed request and loads again on "Try again"
+test/certificates.test.jsx > Certificate list > drops the rows on screen when a reload fails, and recovers
+test/certificates.test.jsx > Certificate list > searches 300 ms after the last keystroke, with a single request
+test/certificates.test.jsx > Certificate list > searches at once on Enter and does not repeat the request when the debounce fires
+test/certificates.test.jsx > Certificate list > filters by status
+test/bulkIssueStore.test.js > bulkIssueStore (item A) > starts idle for every actor
+test/bulkIssueStore.test.js > bulkIssueStore (item A) > item A: locks synchronously - a second submit while one is in flight sends nothing
+test/certificates.test.jsx > Certificate list > sorts by a column header and toggles the order on the second click
+test/export.test.jsx > CSV export > downloads the file for the default view and reports it
+test/bulkIssueStore.test.js > bulkIssueStore (item A) > keeps the attempt of a failed run, so a retry sends the same course and key
+test/certificates.test.jsx > Certificate list > sorts through the "Sort by" menu and keeps the column headers in sync
+test/bulkIssueStore.test.js > bulkIssueStore (item A) > item A: keeps one entry per actor - an operation of one tenant is never read by another
+test/bulkIssueStore.test.js > bulkIssueStore (item A) > dismisses a finished run but never a request in flight
+test/certificates.test.jsx > Certificate list > pages through the results
+test/export.test.jsx > CSV export > carries exactly the active search, status filter, sort column and order
+test/export.test.jsx > CSV export > exports the sort order chosen in the "Sort by" menu
+test/export.test.jsx > CSV export > uses the text in the search box even when Export is clicked before the search debounce has fired
+test/bulkIssueStore.test.js > bulkIssueStore (item A) > notifies subscribers of every change until they unsubscribe
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > brings a request that was in flight back as an unknown outcome with the same course and key
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > brings the retry prompt after a lost answer back as it was
+test/certificates.test.jsx > Certificate list > starts over at page 1 when the filter or the sort order changes
+test/certificates.test.jsx > Certificate list > switches the actor: other X-Actor-Email, other tenant, none of the previous rows
+test/export.test.jsx > CSV export > shows that an export is running and locks the button meanwhile
+test/export.test.jsx > CSV export > sends one request for a double click
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > brings the retry prompt after an HTTP 500 back as it was
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > brings the retry prompt after a busy database back as it was
+test/certificates.test.jsx > Certificate list > starts the other tenant with a fresh page: search, filters and paging do not carry over
+test/certificates.test.jsx > Certificate list > never shows the previous tenant's rows, also when its slow answer arrives after the switch
+test/certificates.test.jsx > Certificate list > falls back to the first admin when the remembered one is unknown
+test/certificates.test.jsx > Certificate list > reports a failed start-up and retries
+test/certificates.test.jsx > Certificate list > steps back to the last existing page when the rows of the current page have disappeared
+test/export.test.jsx > CSV export > reports a failed export and retries it with the same filters
+test/export.test.jsx > CSV export > reports a download that breaks off half-way as failed and saves nothing
+test/export.test.jsx > CSV export > exports the other tenant's file after an actor switch
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > brings the retry prompt after an unexpected exception back as it was
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > keeps nothing once the outcome is known: a result, a rejection, a dismissed prompt
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > keeps the attempts of two actors apart, also across the page load
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > starts empty when the storage holds text that is not JSON
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > starts empty when the storage holds JSON of another shape
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > starts empty when the storage holds null
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > starts empty when the storage holds a record without a key
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > starts empty when the storage holds a record that is not an object
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > works without a storage, and with one that refuses every access
+test/bulkIssueStore.test.js > bulkIssueStore: attempts without a known outcome survive a page load > uses the sessionStorage of the tab unless told otherwise
+test/api.test.js > api.js: requests > names the actor on every call and never sends a tenant
+test/api.test.js > api.js: requests > leaves empty filters out of the query string
+test/api.test.js > api.js: requests > asks for the actor list without an actor
+test/api.test.js > api.js: requests > reports whether a bulk issue was replayed
+test/api.test.js > api.js: failures > turns an error answer into an ApiError with the server's code and message
+test/api.test.js > api.js: failures > copes with an error answer that is not JSON
+test/api.test.js > api.js: failures > reports a request without an answer as status 0 / network_error
+test/api.test.js > api.js: failures > item B: a 2xx answer with truncated JSON becomes ApiError(0, network_error) - retryable, like a lost answer
+test/api.test.js > api.js: failures > item B: a 2xx answer with a body that is not JSON becomes ApiError(0, network_error) - retryable, like a lost answer
+test/api.test.js > api.js: failures > item B: a 2xx answer with a connection cut after the headers becomes ApiError(0, network_error) - retryable, like a lost answer
+test/api.test.js > api.js: failures > item B: an abort while the body of a 2xx answer is being read still surfaces as an abort
+test/api.test.js > api.js: failures > surfaces an aborted request as an AbortError
+test/api.test.js > api.js: failures > item D: listCertificates rejects a 200 answer of the wrong shape with ApiError(0, invalid_response)
+test/api.test.js > api.js: failures > item D: getCertificate rejects a 200 answer of the wrong shape with ApiError(0, invalid_response)
+test/api.test.js > api.js: failures > item D: listCourses rejects a 200 answer of the wrong shape with ApiError(0, invalid_response)
+test/api.test.js > api.js: failures > item D: getRoster rejects a 200 answer of the wrong shape with ApiError(0, invalid_response)
+test/api.test.js > api.js: failures > item D: listOperations rejects a 200 answer of the wrong shape with ApiError(0, invalid_response)
+test/api.test.js > api.js: failures > item D: getOperation rejects a 200 answer of the wrong shape with ApiError(0, invalid_response)
+test/api.test.js > api.js: failures > item D: a roster whose course has no id is rejected with ApiError(0, invalid_response): the pages could not use it
+test/api.test.js > api.js: failures > item D: the roster of another course is rejected with ApiError(0, invalid_response): the pages could not use it
+test/api.test.js > api.js: failures > item D: a roster whose course id is text is rejected with ApiError(0, invalid_response): the pages could not use it
+test/api.test.js > api.js: failures > item D: another operation is rejected with ApiError(0, invalid_response): the pages could not use it
+test/api.test.js > api.js: failures > item D: a course list whose ids are text is rejected with ApiError(0, invalid_response): the pages could not use it
+test/api.test.js > api.js: failures > item D: an id may be asked for as a number or as text (a <select> hands out text)
+test/api.test.js > api.js: failures > item D: the writes check their answers too, and treat a wrong shape as an unknown outcome
+test/api.test.js > api.js: failures > item D: accepts every answer of the real backend (the shape checks reject nothing that was recorded)
+test/api.test.js > api.js: writeOutcome > classifies a 503 database_busy
+test/api.test.js > api.js: writeOutcome > classifies a 400
+test/api.test.js > api.js: writeOutcome > classifies a 404
+test/api.test.js > api.js: writeOutcome > classifies a 409
+test/api.test.js > api.js: writeOutcome > classifies no answer
+test/api.test.js > api.js: writeOutcome > classifies an answer that was not understood
+test/api.test.js > api.js: writeOutcome > classifies a 500
+test/api.test.js > api.js: writeOutcome > classifies a 502
+test/api.test.js > api.js: writeOutcome > classifies another 503
+test/api.test.js > api.js: writeOutcome > classifies a TypeError
+test/api.test.js > api.js: writeOutcome > classifies a thrown string
+test/api.test.js > api.js: exportCsv > saves the file under the name the server chose
+test/api.test.js > api.js: exportCsv > item G: passes the signal on, so aborting cancels the download
+test/api.test.js > api.js: exportCsv > item G: saves nothing when the abort comes after the file has arrived
+test/api.test.js > api.js: exportCsv > item B: reports a download that breaks off as ApiError(0, network_error)
+test/strict-mode.test.jsx > Under StrictMode > loads the list; the request of the discarded first mount is cancelled and never rendered
+test/support.test.js > fakeServer answers like the recorded backend > orders the default list like the export the backend produced (newest first, ties by instant)
+test/support.test.js > fakeServer answers like the recorded backend > rejects control characters in the search like the backend
+test/support.test.js > fakeServer answers like the recorded backend > hides the other tenant: its ids do not exist
+test/support.test.js > fakeServer answers like the recorded backend > revokes exactly like the recorded revocation, and is idempotent
+test/support.test.js > fakeServer answers like the recorded backend > executes a bulk issue once per key, replays it, and refuses the key for another request
+test/support.test.js > console guard > collects console.error and console.warn output, except what a test announced
+test/strict-mode.test.jsx > Under StrictMode > item A: one POST per bulk issue, and the pending attempt survives a tab round trip
+test/strict-mode.test.jsx > Under StrictMode > item A: an attempt interrupted by a page reload comes back once, with its key
+test/strict-mode.test.jsx > Under StrictMode > item B: a lost answer is retried with the same key
+test/strict-mode.test.jsx > Under StrictMode > item E: one POST per confirmed revocation; an unknown outcome refreshes drawer and list
+test/strict-mode.test.jsx > Under StrictMode > item E: a repeat while the outcome is unknown is one more POST, answered "already revoked"
+test/strict-mode.test.jsx > Under StrictMode > item G: one export per click, saved once; an actor switch still cancels an export in flight

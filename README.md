@@ -22,6 +22,8 @@ else to install. Verified on Node 20.20, 22.23 and 24.22.
 | 100,000 certificates for East | [4. Load-test data](#4-load-test-data-100000-certificates): `npm run generate:east` |
 | A1–A7: how each is met, and how to reproduce it | [6. How the acceptance criteria are met](#6-how-the-acceptance-criteria-are-met), [Reproducing A1–A7 by hand](#reproducing-a1a7-by-hand) |
 | Known defects, unfinished work | [10. Known defects and unfinished work](#10-known-defects-and-unfinished-work) |
+| AI interaction evidence | [`ai/`](ai/README.md): the sessions, `session-index.csv`, `decision-log.md`, `tool-actions.csv`, `completeness-declaration.md` |
+| Written answers | [`written-answers.md`](written-answers.md) |
 
 ![Certificate list](docs/screenshots/01-certificates.png)
 
@@ -189,6 +191,14 @@ generated set, so the count never piles up; `--clear` removes it and leaves exac
 were there without it; `npm run db:reset` restores the pristine dataset and shrinks the database
 file back to the size of a newly created one.
 
+What does change while the generated rows are loaded is what the console shows for East: the list
+counts 100,007 certificates instead of 7, and the course picker offers the ten generated courses
+(titled "… (load test)") next to the three demo courses. Scenario A6 exports and lists these rows
+through the app, so they have to be in the database it serves. `--clear` puts the console back as
+it was; the database file keeps its size until `npm run db:reset`. To leave the quick-start
+database file untouched altogether, generate into a separate file with `--db` and start the app
+on that file (fourth line above).
+
 The generator writes everything in one transaction. While it runs, a server on the same database
 keeps answering reads (which see the old rows until the generator commits) and retries of finished
 bulk issues; new writes wait for it and complete as soon as it is done.
@@ -210,8 +220,10 @@ longer than `DB_BUSY_TIMEOUT_MS`) and `export_busy` (32 exports are already wait
 export slot). Anything unexpected is a `500 internal_error`; its cause goes to the server log, not
 into the answer.
 
-Query parameters are validated: an unknown value is a `400`, never silently ignored; a parameter
-that is present but blank (`?sort=`) counts as not given. A few parameters also answer to a second
+Query parameters are validated: an unknown value of a parameter the endpoint knows (`sort=bogus`)
+is a `400`, never silently ignored; a parameter name it does not know (`?foo=bar`) is ignored -
+the tenant, in particular, is never read from the query; a parameter that is present but blank
+(`?sort=`) counts as not given. A few parameters also answer to a second
 name (`q`/`search`, `sort`/`sortBy`, `order`/`dir`, `pageSize`/`limit`); sending two names of the
 same parameter is a `400` as well, because one of them would have to be ignored. The same goes for
 the sort direction, which can be written as `order=desc` or as a leading `-` (`sort=-issued`) but
@@ -356,7 +368,9 @@ curl -s -H "$A" "$URL/api/audit-events?action=certificate.issued" | grep -o '"to
 
 ```bash
 curl -s -w ' -> %{http_code}\n' -X POST -H "$A" -H "$J" -H 'Idempotency-Key: demo-par' \
-     -d '{"courseId": 3}' "$URL/api/bulk-issues"                           # 409 idempotency_key_reused
+     -d '{"courseId": 3}' "$URL/api/bulk-issues"                           # another course: 409 idempotency_key_reused
+curl -s -w ' -> %{http_code}\n' -X POST -H "$A" -H "$J" -H 'Idempotency-Key: demo-par' \
+     -d '{"courseId": 1, "note": "x"}' "$URL/api/bulk-issues"              # the same course, another payload: 409 as well
 curl -s -X POST -H "$A" -H "$J" -H 'Idempotency-Key: demo-par' -d '{"courseId": 1}' "$URL/api/bulk-issues" \
   | cmp - /tmp/a2-1.json && echo 'first result intact'                    # the original request still gets the first answer
 curl -s -H "$A" "$URL/api/bulk-issues" | grep -o '"id":[0-9]*,"status"' | wc -l   # still 2 operations
@@ -391,8 +405,9 @@ curl -s -H "$B" "$URL/api/certificates/export.csv?sort=issued&order=asc" | head 
 These lines show the conversion, not the ordering rule: the quick-start rows of a tenant come out
 in the same order whether they are sorted by the local calendar date or by the UTC date. The case
 that tells the two apart - two certificates issued on the same UTC day that fall on different
-Sydney days, the later one with the lower id - is built and checked, for the list and for the
-CSV, by one test of the suite:
+Sydney days, the later one with the lower id - shows on the running app as soon as the load-test
+rows of A6 are loaded (the lines marked *A5* there). It is also built and checked, for the list
+and for the CSV, by one test of the suite:
 
 ```bash
 (cd backend && node --test --test-reporter=spec --test-name-pattern='tenant-local calendar date' test/acceptance.test.js)
@@ -406,6 +421,7 @@ Q='q=an&sort=learner&order=desc'
 time curl -s -H "$A" "$URL/api/certificates/export.csv?$Q" -o /tmp/e1.csv   # well under a second each
 time curl -s -H "$A" "$URL/api/certificates/export.csv?$Q" -o /tmp/e2.csv
 cmp /tmp/e1.csv /tmp/e2.csv && wc -l < /tmp/e1.csv                          # identical; 25,481 lines (header + 25,480 rows)
+curl -s -H "$A" "$URL/api/certificates?$Q&pageSize=1" | grep -o '"total":[0-9]*'   # "total":25480 - the rows the list counts for this search
 
 # equal sort keys come in id order (most rows of this page share their name with the row before):
 curl -s -H "$A" "$URL/api/certificates?sort=learner&order=asc&pageSize=100&page=7" | node -e '
@@ -416,6 +432,37 @@ curl -s -H "$A" "$URL/api/certificates?sort=learner&order=asc&pageSize=100&page=
 # list requests are answered (in milliseconds) while three full exports are streaming:
 for i in 1 2 3; do curl -s -H "$A" "$URL/api/certificates/export.csv" -o /dev/null & done
 for i in 1 2 3 4 5 6; do curl -s -o /dev/null -w '%{time_total}s ' -H "$A" "$URL/api/certificates?page=40&pageSize=50"; done; echo; wait
+
+# the same with an export that is certainly still open: its reader pauses for three seconds, so the
+# server cannot finish sending. The list request is answered meanwhile; then the export completes.
+curl -s -H "$A" "$URL/api/certificates/export.csv" | (sleep 3; wc -l) &
+sleep 1
+curl -s -o /dev/null -w 'list during the export: %{http_code} in %{time_total}s\n' -H "$A" "$URL/api/certificates?page=40&pageSize=50"
+wait     # 100011 lines; the server's log (first terminal) has the list request before the export, which took about 3,100 ms
+
+# A5 - ordering by the tenant-local date. Certificate 1 (EAST-0000001) was issued at 13:30 UTC on
+# 10 January, which is 11 January in Sydney. A hundred generated certificates were issued earlier
+# on that UTC day - still 10 January in Sydney - and all of them have higher ids. Sorted by issue
+# date they come before it, in the CSV ...
+curl -s -H "$A" "$URL/api/certificates/export.csv?sort=issued&order=asc" | grep -B2 -A1 'EAST-0000001'
+# Emma Cooper,Confined Spaces (load test),EAST-LT-0057799,2026-01-10 22:56
+# Sophie Baker,Chemical Handling (load test),EAST-LT-0057800,2026-01-10 22:56
+# Alex Lee,Safety 101,EAST-0000001,2026-01-11 00:30
+# Violet White,Asbestos Awareness (load test),EAST-LT-0057801,2026-01-11 17:02
+# ... and in the list (the two pages of 100 rows around it, found through its line in the CSV):
+N=$(curl -s -H "$A" "$URL/api/certificates/export.csv?sort=issued&order=asc" | grep -n 'EAST-0000001' | cut -d: -f1)
+P=$(( (N - 2) / 100 + 1 ))
+{ curl -s -H "$A" "$URL/api/certificates?sort=issued&order=asc&pageSize=100&page=$((P - 1))"; echo
+  curl -s -H "$A" "$URL/api/certificates?sort=issued&order=asc&pageSize=100&page=$P"; } | node -e '
+  const rows = require("fs").readFileSync(0, "utf8").trim().split("\n").flatMap((page) => JSON.parse(page).items);
+  const at = rows.findIndex((c) => c.serialNumber === "EAST-0000001"), mine = rows[at];
+  const sameUtcDay = rows.slice(0, at).filter((c) => c.issuedAt.slice(0, 10) === mine.issuedAt.slice(0, 10));
+  console.log(sameUtcDay.length, "certificates of the same UTC day are listed before it, the lowest id among them", Math.min(...sameUtcDay.map((c) => c.id)));
+  for (const c of [rows[at - 1], mine, rows[at + 1]]) console.log(String(c.id).padStart(6), c.serialNumber.padEnd(16), c.issuedAt, "->", c.issuedLocal)'
+# 100 certificates of the same UTC day are listed before it, the lowest id among them 57715
+#  57814 EAST-LT-0057800  2026-01-10T11:56:38.000Z -> 2026-01-10 22:56
+#      1 EAST-0000001     2026-01-10T13:30:00.000Z -> 2026-01-11 00:30
+#  57815 EAST-LT-0057801  2026-01-11T06:02:18.000Z -> 2026-01-11 17:02
 
 npm run generate:east -- --clear                # back to the quick-start certificates
 ```
@@ -608,6 +655,9 @@ frontend/
                            answers and record.mjs, the script that records them)
 data/                      SQLite database (created on first start, git-ignored)
 docs/screenshots/          the images used in this README
+ai/                        AI interaction evidence: session exports, indexes, decision log,
+                           completeness declaration (start at ai/README.md)
+written-answers.md         answers to the three written questions of the assignment
 ```
 
 ## 9. Troubleshooting
@@ -657,7 +707,7 @@ docs/screenshots/          the images used in this README
 
 ## 10. Known defects and unfinished work
 
-**Known defects** - behaviour that is wrong or surprising, and that I know of:
+**Known defects** - behaviour that is wrong or surprising, and known:
 
 - *A very large bulk issue holds every other request up while it runs.* It is one synchronous
   transaction. Measured: issuing to 20,000 eligible learners takes about one second, and a list
@@ -671,6 +721,12 @@ docs/screenshots/          the images used in this README
   selected in the drawer.
 - *Leaving with the browser's Back button while a revocation is on its way* closes the
   confirmation without its outcome message. The request is not cancelled; the list shows the result.
+- *While the list reloads, its "Loading…" indicator sits on top of the Status column heading.* The
+  rows stay readable, and on a local machine a reload takes milliseconds.
+- *The hour that occurs twice at the end of daylight saving time looks the same in the list and in
+  the CSV.* `EAST-0000003` and `EAST-0000004` were issued an hour apart and both read
+  `2026-04-05 02:30` there; the order is right, and only the certificate's detail view adds the
+  offset (UTC+11:00, UTC+10:00).
 - *A download cut short is not noticed by every client.* The server resets the connection of a
   download it gives up, but netcat and raw Node.js sockets report a reset after data as a normal
   end; and a client that half-closes its connection (`nc -N`) or reads more slowly than a few kB/s
@@ -685,14 +741,14 @@ docs/screenshots/          the images used in this README
   Node's watch mode stops watching a file that failed to load: save any other file of the backend,
   or restart the command.
 
-**Not verified** - I have no evidence either way:
+**Not verified** - there is no evidence either way:
 
 - Browsers other than Chromium, and real screen readers. Keyboard operation, focus handling and the
   accessibility tree were checked in Chromium only.
 - Windows. The commands and tests were run on Linux (Node 20.20, 22.23 and 24.22).
 - More than 100,000 certificates per tenant (the generator accepts up to 2,000,000).
 
-**Unfinished work** - not built, and what I would do next:
+**Unfinished work** - not built, and what would come next:
 
 - *Excluded by the specification:* real authentication and authorisation (the actor header is
   trusted as it is), deployment, notifications.

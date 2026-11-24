@@ -1,0 +1,632 @@
+     1	import { describe, expect, it, vi } from 'vitest';
+     2	
+     3	import { ApiError, createApi, fetchActors, writeOutcome } from '../src/api.js';
+     4	import { captureDownloads } from './support/app.jsx';
+     5	import { ALICE, BOB, deferred, errorAnswer, json, networkError, recorded, startFakeServer, unreadableBody } from './support/fakeServer.js';
+     6	
+     7	const failure = (promise) => promise.then(() => expect.unreachable('the call should have failed'), (error) => error);
+     8	
+     9	describe('api.js: requests', () => {
+    10	  it('names the actor on every call and never sends a tenant', async () => {
+    11	    const server = startFakeServer();
+    12	    const api = createApi(BOB);
+    13	    await api.listCertificates({ q: 'lee', status: 'all', sort: 'issued', order: 'desc', page: 1, pageSize: 25 });
+    14	    await api.getCertificate(8);
+    15	    await api.listCourses();
+    16	    await api.getRoster(4, 1);
+    17	    await api.listOperations();
+    18	    await api.bulkIssue(4, 'key-1');
+    19	    await api.getOperation(3);
+    20	    await api.revokeCertificate(8, 'Issued in error');
+    21	
+    22	    expect(server.requests.map((request) => request.actor)).toEqual(Array(8).fill(BOB));
+    23	    expect(server.requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+    24	      'GET /api/certificates',
+    25	      'GET /api/certificates/8',
+    26	      'GET /api/courses',
+    27	      'GET /api/courses/4/enrollments',
+    28	      'GET /api/bulk-issues',
+    29	      'POST /api/bulk-issues',
+    30	      'GET /api/bulk-issues/3',
+    31	      'POST /api/certificates/8/revoke',
+    32	    ]);
+    33	    expect(JSON.stringify(server.requests)).not.toMatch(/tenant/i);
+    34	    expect(server.requests[5].headers['idempotency-key']).toBe('key-1');
+    35	  });
+    36	
+    37	  it('leaves empty filters out of the query string', async () => {
+    38	    const server = startFakeServer();
+    39	    await createApi(ALICE).listCertificates({ q: '', status: 'all', sort: 'issued', order: 'desc', page: 1, pageSize: 25 });
+    40	    expect(server.requests[0].query).toEqual({ status: 'all', sort: 'issued', order: 'desc', page: '1', pageSize: '25' });
+    41	  });
+    42	
+    43	  it('asks for the actor list without an actor', async () => {
+    44	    const server = startFakeServer();
+    45	    expect(await fetchActors()).toEqual(recorded.actors.items);
+    46	    expect(server.requests[0].actor).toBeNull();
+    47	  });
+    48	
+    49	  it('reports whether a bulk issue was replayed', async () => {
+    50	    startFakeServer();
+    51	    const api = createApi(ALICE);
+    52	    const first = await api.bulkIssue(1, 'key-1');
+    53	    const again = await api.bulkIssue(1, 'key-1');
+    54	    expect(first.replayed).toBe(false);
+    55	    expect(again.replayed).toBe(true);
+    56	    expect(again.operation).toEqual(first.operation);
+    57	  });
+    58	});
+    59	
+    60	describe('api.js: failures', () => {
+    61	  it('turns an error answer into an ApiError with the server\'s code and message', async () => {
+    62	    const server = startFakeServer();
+    63	    server.once('POST', '/api/bulk-issues', () => errorAnswer(recorded.errors.keyReused));
+    64	    const error = await failure(createApi(ALICE).bulkIssue(1, 'key-1'));
+    65	    expect(error).toBeInstanceOf(ApiError);
+    66	    expect(error).toMatchObject({ status: 409, code: 'idempotency_key_reused', details: { operationId: 1 }, retryable: false });
+    67	    expect(error.message).toContain('was already used for a different request');
+    68	  });
+    69	
+    70	  it('copes with an error answer that is not JSON', async () => {
+    71	    const server = startFakeServer();
+    72	    server.once('GET', '/api/courses', () => new Response('<h1>Bad gateway</h1>', { status: 502 }));
+    73	    const error = await failure(createApi(ALICE).listCourses());
+    74	    expect(error).toMatchObject({ status: 502, code: 'http_error', message: 'The server answered with HTTP 502', retryable: true });
+    75	  });
+    76	
+    77	  it('reports a request without an answer as status 0 / network_error', async () => {
+    78	    const server = startFakeServer();
+    79	    server.once('GET', '/api/courses', () => {
+    80	      throw networkError();
+    81	    });
+    82	    const error = await failure(createApi(ALICE).listCourses());
+    83	    expect(error).toBeInstanceOf(ApiError);
+    84	    expect(error).toMatchObject({ status: 0, code: 'network_error', retryable: true });
+    85	  });
+    86	
+    87	  it.each([
+    88	    ['truncated JSON', () => new Response('{"id":1,"status":"comp', { status: 201 })],
+    89	    ['a body that is not JSON', () => new Response('<html>ok</html>', { status: 201 })],
+    90	    ['a connection cut after the headers', () => unreadableBody(201)],
+    91	  ])('item B: a 2xx answer with %s becomes ApiError(0, network_error) - retryable, like a lost answer', async (_case, answer) => {
+    92	    const server = startFakeServer();
+    93	    server.once('POST', '/api/bulk-issues', answer);
+    94	    const error = await failure(createApi(ALICE).bulkIssue(1, 'key-1'));
+    95	    expect(error).toBeInstanceOf(ApiError);
+    96	    expect(error).toMatchObject({ status: 0, code: 'network_error', retryable: true });
+    97	    expect(error.message).toBe('The answer from the server could not be read: the connection was interrupted or the response was incomplete.');
+    98	    expect(writeOutcome(error)).toBe('unknown');
+    99	  });
+   100	
+   101	  it('item B: an abort while the body of a 2xx answer is being read still surfaces as an abort', async () => {
+   102	    const server = startFakeServer();
+   103	    const abort = new DOMException('The operation was aborted.', 'AbortError');
+   104	    server.once('GET', '/api/certificates', () => ({
+   105	      ok: true,
+   106	      status: 200,
+   107	      headers: new Headers(),
+   108	      json: async () => {
+   109	        throw abort;
+   110	      },
+   111	    }));
+   112	    const error = await failure(createApi(ALICE).listCertificates({}, new AbortController().signal));
+   113	    expect(error).toBe(abort);
+   114	    expect(error).not.toBeInstanceOf(ApiError);
+   115	  });
+   116	
+   117	  it('surfaces an aborted request as an AbortError', async () => {
+   118	    const server = startFakeServer();
+   119	    server.on('GET', '/api/certificates', () => new Promise(() => {})); // never answers
+   120	    const controller = new AbortController();
+   121	    const pending = failure(createApi(ALICE).listCertificates({}, controller.signal));
+   122	    controller.abort();
+   123	    expect((await pending).name).toBe('AbortError');
+   124	  });
+   125	
+   126	  it.each([
+   127	    ['listCertificates', (api) => api.listCertificates({}), '/api/certificates'],
+   128	    ['getCertificate', (api) => api.getCertificate(1), '/api/certificates/1'],
+   129	    ['listCourses', (api) => api.listCourses(), '/api/courses'],
+   130	    ['getRoster', (api) => api.getRoster(1, 1), '/api/courses/1/enrollments'],
+   131	    ['listOperations', (api) => api.listOperations(), '/api/bulk-issues'],
+   132	    ['getOperation', (api) => api.getOperation(1), '/api/bulk-issues/1'],
+   133	  ])('item D: %s rejects a 200 answer of the wrong shape with ApiError(0, invalid_response)', async (_name, call, path) => {
+   134	    for (const body of [{ foo: 1 }, null, [], 'text', 42]) {
+   135	      const server = startFakeServer();
+   136	      server.once('GET', path, () => json(200, body));
+   137	      const error = await failure(call(createApi(ALICE)));
+   138	      expect(error).toBeInstanceOf(ApiError);
+   139	      expect(error).toMatchObject({ status: 0, code: 'invalid_response', retryable: true });
+   140	    }
+   141	  });
+   142	
+   143	  it.each([
+   144	    ['a roster whose course has no id', (api) => api.getRoster(1, 1), '/api/courses/1/enrollments', (body) => ({ ...body, course: { title: 'Safety 101' } })],
+   145	    ['the roster of another course', (api) => api.getRoster(1, 1), '/api/courses/1/enrollments', (body) => ({ ...body, course: { ...body.course, id: 2 } })],
+   146	    ['a roster whose course id is text', (api) => api.getRoster(1, 1), '/api/courses/1/enrollments', (body) => ({ ...body, course: { ...body.course, id: '1' } })],
+   147	    ['another operation', (api) => api.getOperation(1), '/api/bulk-issues/1', (body) => ({ ...body, id: 2 })],
+   148	    ['a course list whose ids are text', (api) => api.listCourses(), '/api/courses', (body) => ({ items: body.items.map((course) => ({ ...course, id: String(course.id) })) })],
+   149	  ])('item D: %s is rejected with ApiError(0, invalid_response): the pages could not use it', async (_case, call, path, spoil) => {
+   150	    const server = startFakeServer();
+   151	    server.bulkIssue(ALICE, 1, 'key-1');
+   152	    server.once('GET', path, async (_request, respond) => json(200, spoil(await respond().json())));
+   153	    const error = await failure(call(createApi(ALICE)));
+   154	    expect(error).toBeInstanceOf(ApiError);
+   155	    expect(error).toMatchObject({ status: 0, code: 'invalid_response', retryable: true });
+   156	    await expect(call(createApi(ALICE))).resolves.toBeTruthy(); // the genuine answer is accepted
+   157	  });
+   158	
+   159	  it('item D: an id may be asked for as a number or as text (a <select> hands out text)', async () => {
+   160	    const server = startFakeServer();
+   161	    server.bulkIssue(ALICE, 1, 'key-1');
+   162	    const api = createApi(ALICE);
+   163	    await expect(api.getRoster('1', 1)).resolves.toMatchObject({ course: { id: 1 } });
+   164	    await expect(api.getRoster(1, 1)).resolves.toMatchObject({ course: { id: 1 } });
+   165	    await expect(api.getOperation('1')).resolves.toMatchObject({ id: 1 });
+   166	  });
+   167	
+   168	  it('item D: the writes check their answers too, and treat a wrong shape as an unknown outcome', async () => {
+   169	    const server = startFakeServer();
+   170	    server.once('POST', '/api/bulk-issues', () => json(201, { foo: 1 }));
+   171	    server.once('POST', '/api/certificates/4/revoke', () => json(200, null));
+   172	    const api = createApi(ALICE);
+   173	    expect(writeOutcome(await failure(api.bulkIssue(1, 'key-1')))).toBe('unknown');
+   174	    expect(writeOutcome(await failure(api.revokeCertificate(4)))).toBe('unknown');
+   175	  });
+   176	
+   177	  it('item D: accepts every answer of the real backend (the shape checks reject nothing that was recorded)', async () => {
+   178	    const server = startFakeServer();
+   179	    server.on('GET', '/api/actors', () => json(200, recorded.actors));
+   180	    await expect(fetchActors()).resolves.toHaveLength(2);
+   181	
+   182	    for (const actor of [ALICE, BOB]) {
+   183	      const api = createApi(actor);
+   184	      const tenant = recorded.tenants[actor];
+   185	      const { courseId, runs, rosterAfter, operationsAfter } = recorded.bulkIssues[actor];
+   186	      const answers = [
+   187	        [() => api.getRoster(courseId, 1), rosterAfter],
+   188	        [() => api.listOperations(), { items: operationsAfter }],
+   189	        ...Object.values(tenant.details).map((certificate) => [() => api.getCertificate(certificate.id), certificate]),
+   190	        ...Object.values(tenant.rosters).map((roster) => [() => api.getRoster(roster.course.id, 1), roster]),
+   191	        ...runs.map((operation) => [() => api.getOperation(operation.id), operation]),
+   192	        [() => api.revokeCertificate(4), recorded.revoke.response],
+   193	        [() => api.revokeCertificate(4), recorded.revoke.repeat],
+   194	      ];
+   195	      for (const [call, body] of answers) {
+   196	        server.once(body === recorded.revoke.response || body === recorded.revoke.repeat ? 'POST' : 'GET', /./, () => json(200, body));
+   197	        await expect(call()).resolves.toBeTruthy();
+   198	      }
+   199	      // list pages come out of the fake server built from the recorded rows
+   200	      await expect(api.listCertificates({ pageSize: 100 })).resolves.toMatchObject({ total: tenant.certificates.length });
+   201	    }
+   202	  });
+   203	});
+   204	
+   205	describe('api.js: writeOutcome', () => {
+   206	  it.each([
+   207	    ['a 503 database_busy', new ApiError(503, 'database_busy', 'busy'), 'not_run'],
+   208	    ['a 400', new ApiError(400, 'invalid_request', 'bad'), 'rejected'],
+   209	    ['a 404', new ApiError(404, 'not_found', 'gone'), 'rejected'],
+   210	    ['a 409', new ApiError(409, 'idempotency_key_reused', 'reused'), 'rejected'],
+   211	    ['no answer', new ApiError(0, 'network_error', 'offline'), 'unknown'],
+   212	    ['an answer that was not understood', new ApiError(0, 'invalid_response', 'odd'), 'unknown'],
+   213	    ['a 500', new ApiError(500, 'internal_error', 'oops'), 'unknown'],
+   214	    ['a 502', new ApiError(502, 'http_error', 'gateway'), 'unknown'],
+   215	    ['another 503', new ApiError(503, 'http_error', 'unavailable'), 'unknown'],
+   216	    ['a TypeError', new TypeError('x is undefined'), 'unknown'],
+   217	    ['a thrown string', 'boom', 'unknown'],
+   218	  ])('classifies %s', (_case, error, outcome) => {
+   219	    expect(writeOutcome(error)).toBe(outcome);
+   220	  });
+   221	});
+   222	
+   223	describe('api.js: exportCsv', () => {
+   224	  const params = { q: 'lee', status: 'all', sort: 'learner', order: 'asc' };
+   225	
+   226	  it('saves the file under the name the server chose', async () => {
+   227	    const saved = captureDownloads();
+   228	    const server = startFakeServer();
+   229	    const result = await createApi(ALICE).exportCsv(params);
+   230	    expect(server.requests[0].query).toEqual({ q: 'lee', status: 'all', sort: 'learner', order: 'asc' });
+   231	    expect(saved.map((file) => file.fileName)).toEqual([result.fileName]);
+   232	    expect(result.fileName).toMatch(/^certificates-east-\d{8}-\d{4}\.csv$/);
+   233	    expect(result.bytes).toBe(new TextEncoder().encode(recorded.tenants[ALICE].exportCsv.body).length);
+   234	    expect(document.querySelector('a[download]')).toBeNull(); // the helper link is removed again
+   235	  });
+   236	
+   237	  it('item G: passes the signal on, so aborting cancels the download', async () => {
+   238	    const saved = captureDownloads();
+   239	    const server = startFakeServer();
+   240	    const gate = deferred();
+   241	    server.on('GET', '/api/certificates/export.csv', async (_request, respond) => {
+   242	      await gate.promise;
+   243	      return respond();
+   244	    });
+   245	    const controller = new AbortController();
+   246	    const pending = failure(createApi(ALICE).exportCsv(params, controller.signal));
+   247	    await vi.waitFor(() => expect(server.requests).toHaveLength(1));
+   248	    controller.abort();
+   249	
+   250	    expect((await pending).name).toBe('AbortError');
+   251	    expect(server.requests[0].aborted).toBe(true);
+   252	    gate.resolve();
+   253	    await new Promise((resolve) => setTimeout(resolve, 10));
+   254	    expect(saved).toEqual([]);
+   255	  });
+   256	
+   257	  it('item G: saves nothing when the abort comes after the file has arrived', async () => {
+   258	    const saved = captureDownloads();
+   259	    startFakeServer();
+   260	    const controller = new AbortController();
+   261	    const body = deferred();
+   262	    // A network layer that no longer reacts to the signal: the answer is complete, only the body
+   263	    // is handed over a moment later - after the page that asked for it has gone away.
+   264	    vi.stubGlobal('fetch', async () => ({
+   265	      ok: true,
+   266	      status: 200,
+   267	      headers: new Headers({ 'Content-Disposition': recorded.tenants[ALICE].exportCsv.contentDisposition }),
+   268	      blob: () => body.promise,
+   269	    }));
+   270	    const pending = failure(createApi(ALICE).exportCsv(params, controller.signal));
+   271	    controller.abort();
+   272	    body.resolve(new Blob([recorded.tenants[ALICE].exportCsv.body]));
+   273	
+   274	    expect((await pending).name).toBe('AbortError');
+   275	    expect(saved).toEqual([]);
+   276	  });
+   277	
+   278	  it('item B: reports a download that breaks off as ApiError(0, network_error)', async () => {
+   279	    const saved = captureDownloads();
+   280	    const server = startFakeServer();
+   281	    server.once('GET', '/api/certificates/export.csv', () => unreadableBody(200));
+   282	    const error = await failure(createApi(ALICE).exportCsv(params));
+   283	    expect(error).toMatchObject({ status: 0, code: 'network_error' });
+   284	    expect(saved).toEqual([]);
+   285	  });
+   286	});
+   287	/**
+   288	 * The tests are only as good as their stand-ins. These checks tie the fake server to the answers
+   289	 * recorded from the real backend, and make sure the console guard of test/setup.js works.
+   290	 */
+   291	import { describe, expect, it } from 'vitest';
+   292	
+   293	import { consoleGuard, expectConsoleError } from './support/console.js';
+   294	import { ALICE, BOB, recorded, startFakeServer } from './support/fakeServer.js';
+   295	
+   296	const call = async (actor, method, path, { body, key } = {}) => {
+   297	  const headers = { 'X-Actor-Email': actor };
+   298	  if (key) headers['Idempotency-Key'] = key;
+   299	  const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+   300	  return { status: response.status, replayed: response.headers.get('Idempotent-Replayed'), body: await response.json() };
+   301	};
+   302	
+   303	describe('fakeServer answers like the recorded backend', () => {
+   304	  it('orders the default list like the export the backend produced (newest first, ties by instant)', async () => {
+   305	    startFakeServer();
+   306	    for (const actor of [ALICE, BOB]) {
+   307	      const { body } = await call(actor, 'GET', '/api/certificates');
+   308	      const exportedSerials = recorded.tenants[actor].exportCsv.body.trim().split('\n').slice(1).map((line) => line.split(',')[2]);
+   309	      expect(body.items.map((certificate) => certificate.serialNumber)).toEqual(exportedSerials);
+   310	      expect(body).toMatchObject({ page: 1, pageSize: 25, total: exportedSerials.length, totalPages: 1, sort: 'issued', order: 'desc' });
+   311	    }
+   312	  });
+   313	
+   314	  it('rejects control characters in the search like the backend', async () => {
+   315	    startFakeServer();
+   316	    expect(await call(ALICE, 'GET', '/api/certificates?q=Alex%09Lee')).toMatchObject(recorded.errors.invalidSearch);
+   317	    expect((await call(ALICE, 'GET', '/api/certificates?q=%20lee%20')).body.total).toBe(1); // surrounding spaces are trimmed
+   318	  });
+   319	
+   320	  it('hides the other tenant: its ids do not exist', async () => {
+   321	    startFakeServer();
+   322	    expect(await call(ALICE, 'GET', '/api/certificates/8')).toMatchObject(recorded.errors.notFound);
+   323	    expect((await call(BOB, 'GET', '/api/certificates/8')).status).toBe(200);
+   324	    expect((await call('mallory@nowhere.test', 'GET', '/api/certificates')).status).toBe(401);
+   325	  });
+   326	
+   327	  it('revokes exactly like the recorded revocation, and is idempotent', async () => {
+   328	    const server = startFakeServer();
+   329	    const { certificateId, response, repeat } = recorded.revoke;
+   330	    const path = `/api/certificates/${certificateId}/revoke`;
+   331	    expect((await call(ALICE, 'POST', path, { body: { reason: response.revocationReason } })).body).toEqual(response);
+   332	    expect((await call(ALICE, 'POST', path, { body: {} })).body).toEqual(repeat);
+   333	    expect((await call(ALICE, 'GET', `/api/certificates/${certificateId}`)).body).toEqual({ ...response, alreadyRevoked: undefined });
+   334	    expect(server.tenant(ALICE).certificates.find((certificate) => certificate.id === certificateId).status).toBe('revoked');
+   335	  });
+   336	
+   337	  it('executes a bulk issue once per key, replays it, and refuses the key for another request', async () => {
+   338	    startFakeServer();
+   339	    const { courseId, runs, rosterAfter, operationsAfter } = recorded.bulkIssues[ALICE];
+   340	    const first = await call(ALICE, 'POST', '/api/bulk-issues', { body: { courseId }, key: 'k1' });
+   341	    expect(first).toEqual({ status: 201, replayed: 'false', body: { ...runs[0], idempotencyKey: 'k1' } });
+   342	    expect(await call(ALICE, 'POST', '/api/bulk-issues', { body: { courseId }, key: 'k1' })).toEqual({ ...first, replayed: 'true' });
+   343	    expect(await call(ALICE, 'POST', '/api/bulk-issues', { body: { courseId: 2 }, key: 'k1' })).toMatchObject(recorded.errors.keyReused);
+   344	
+   345	    expect((await call(ALICE, 'GET', `/api/courses/${courseId}/enrollments`)).body).toEqual(rosterAfter);
+   346	    expect((await call(ALICE, 'GET', '/api/bulk-issues/1')).body).toEqual(first.body);
+   347	    const second = await call(ALICE, 'POST', '/api/bulk-issues', { body: { courseId }, key: 'k2' });
+   348	    expect(second.body.summary).toEqual(runs[1].summary);
+   349	    expect((await call(ALICE, 'GET', '/api/bulk-issues')).body.items).toEqual(
+   350	      operationsAfter.map((operation) => ({ ...operation, idempotencyKey: operation.id === 1 ? 'k1' : 'k2' })),
+   351	    );
+   352	    expect((await call(BOB, 'GET', '/api/bulk-issues')).body.items).toEqual([]); // nothing of this in the other tenant
+   353	  });
+   354	});
+   355	
+   356	describe('console guard', () => {
+   357	  it('collects console.error and console.warn output, except what a test announced', () => {
+   358	    expectConsoleError(/^expected:/);
+   359	    console.error('expected: this one was announced');
+   360	    console.error('unexpected problem', new TypeError('boom'));
+   361	    console.warn('unexpected warning');
+   362	    expect(consoleGuard.finish()).toEqual(['unexpected problem TypeError: boom', 'unexpected warning']);
+   363	    consoleGuard.start(); // what this test provoked on purpose must not fail it
+   364	  });
+   365	});
+   366	import { describe, expect, it, vi } from 'vitest';
+   367	
+   368	import { ApiError, writeOutcome } from '../src/api.js';
+   369	import { createBulkIssueStore } from '../src/bulkIssueStore.js';
+   370	import { ALICE, BOB, deferred } from './support/fakeServer.js';
+   371	
+   372	const attempt = { courseId: 1, courseTitle: 'Safety 101', key: 'key-1' };
+   373	const operation = { id: 1, summary: { total: 5, issued: 2, skipped: 3, failed: 0 } };
+   374	
+   375	/** An api whose bulkIssue stays pending until the test settles it. */
+   376	function pendingApi(actor = ALICE) {
+   377	  const calls = [];
+   378	  return {
+   379	    actor,
+   380	    calls,
+   381	    bulkIssue: vi.fn((courseId, key) => {
+   382	      const call = deferred();
+   383	      calls.push({ courseId, key, ...call });
+   384	      return call.promise;
+   385	    }),
+   386	  };
+   387	}
+   388	
+   389	describe('bulkIssueStore (item A)', () => {
+   390	  it('starts idle for every actor', () => {
+   391	    const store = createBulkIssueStore();
+   392	    expect(store.read(ALICE)).toEqual({ run: { status: 'idle' }, settled: 0 });
+   393	    expect(store.read(ALICE)).toBe(store.read(ALICE)); // a stable snapshot for useSyncExternalStore
+   394	  });
+   395	
+   396	  it('item A: locks synchronously - a second submit while one is in flight sends nothing', async () => {
+   397	    const store = createBulkIssueStore();
+   398	    const api = pendingApi();
+   399	
+   400	    store.submit(api, attempt);
+   401	    store.submit(api, attempt); // double click
+   402	    store.submit(api, { ...attempt, key: 'key-2' }); // or a click on a page that was mounted again
+   403	    expect(api.bulkIssue).toHaveBeenCalledTimes(1);
+   404	    expect(api.bulkIssue).toHaveBeenCalledWith(1, 'key-1');
+   405	    expect(store.read(ALICE)).toEqual({ run: { status: 'submitting', attempt }, settled: 0 });
+   406	
+   407	    api.calls[0].resolve({ operation, replayed: false });
+   408	    await vi.waitFor(() => expect(store.read(ALICE).run.status).toBe('succeeded'));
+   409	    expect(store.read(ALICE)).toEqual({ run: { status: 'succeeded', attempt, operation, replayed: false }, settled: 1 });
+   410	  });
+   411	
+   412	  it('keeps the attempt of a failed run, so a retry sends the same course and key', async () => {
+   413	    const store = createBulkIssueStore();
+   414	    const api = pendingApi();
+   415	    const lost = new Error('no answer');
+   416	
+   417	    store.submit(api, attempt);
+   418	    api.calls[0].reject(lost);
+   419	    await vi.waitFor(() => expect(store.read(ALICE).run.status).toBe('failed'));
+   420	    expect(store.read(ALICE)).toEqual({ run: { status: 'failed', attempt, error: lost }, settled: 1 });
+   421	
+   422	    store.submit(api, store.read(ALICE).run.attempt);
+   423	    expect(api.bulkIssue).toHaveBeenLastCalledWith(1, 'key-1');
+   424	    api.calls[1].resolve({ operation, replayed: true });
+   425	    await vi.waitFor(() => expect(store.read(ALICE).run.status).toBe('succeeded'));
+   426	    expect(store.read(ALICE)).toMatchObject({ run: { replayed: true }, settled: 2 });
+   427	  });
+   428	
+   429	  it('item A: keeps one entry per actor - an operation of one tenant is never read by another', async () => {
+   430	    const store = createBulkIssueStore();
+   431	    const alice = pendingApi(ALICE);
+   432	    const bob = pendingApi(BOB);
+   433	
+   434	    store.submit(alice, attempt);
+   435	    expect(store.read(BOB)).toEqual({ run: { status: 'idle' }, settled: 0 });
+   436	
+   437	    store.submit(bob, { courseId: 4, courseTitle: 'Safety 101', key: 'key-bob' }); // Bob is not blocked by Alice
+   438	    expect(bob.bulkIssue).toHaveBeenCalledWith(4, 'key-bob');
+   439	    // ... and his submission leaves her pending attempt alone: still locked, same key
+   440	    expect(store.read(ALICE)).toEqual({ run: { status: 'submitting', attempt }, settled: 0 });
+   441	    store.submit(alice, { ...attempt, key: 'key-2' });
+   442	    expect(alice.bulkIssue).toHaveBeenCalledTimes(1);
+   443	
+   444	    alice.calls[0].resolve({ operation, replayed: false });
+   445	    await vi.waitFor(() => expect(store.read(ALICE).run.status).toBe('succeeded'));
+   446	    expect(store.read(BOB).run.status).toBe('submitting');
+   447	    expect(store.read(BOB).settled).toBe(0);
+   448	  });
+   449	
+   450	  it('dismisses a finished run but never a request in flight', async () => {
+   451	    const store = createBulkIssueStore();
+   452	    const api = pendingApi();
+   453	
+   454	    store.submit(api, attempt);
+   455	    store.dismiss(ALICE);
+   456	    expect(store.read(ALICE).run.status).toBe('submitting');
+   457	
+   458	    api.calls[0].resolve({ operation, replayed: false });
+   459	    await vi.waitFor(() => expect(store.read(ALICE).run.status).toBe('succeeded'));
+   460	    store.dismiss(ALICE);
+   461	    expect(store.read(ALICE)).toEqual({ run: { status: 'idle' }, settled: 1 }); // `settled` only ever grows
+   462	  });
+   463	
+   464	  it('notifies subscribers of every change until they unsubscribe', async () => {
+   465	    const store = createBulkIssueStore();
+   466	    const api = pendingApi();
+   467	    const listener = vi.fn();
+   468	    const unsubscribe = store.subscribe(listener);
+   469	
+   470	    store.submit(api, attempt);
+   471	    expect(listener).toHaveBeenCalledTimes(1);
+   472	    api.calls[0].resolve({ operation, replayed: false });
+   473	    await vi.waitFor(() => expect(listener).toHaveBeenCalledTimes(2));
+   474	    store.dismiss(ALICE);
+   475	    expect(listener).toHaveBeenCalledTimes(3);
+   476	    store.dismiss(ALICE); // nothing to dismiss: no change, no notification
+   477	    expect(listener).toHaveBeenCalledTimes(3);
+   478	
+   479	    unsubscribe();
+   480	    store.submit(api, attempt);
+   481	    expect(listener).toHaveBeenCalledTimes(3);
+   482	  });
+   483	});
+   484	
+   485	/**
+   486	 * A full page load ends the store's life while a request may still be on its way. What the next
+   487	 * page needs to carry on safely - the course and above all the key - is kept in the tab's storage.
+   488	 */
+   489	describe('bulkIssueStore: attempts without a known outcome survive a page load', () => {
+   490	  /** Stands in for window.sessionStorage: it outlives the store, like the tab outlives the page. */
+   491	  function tabStorage(initial = {}) {
+   492	    const items = new Map(Object.entries(initial));
+   493	    return {
+   494	      items,
+   495	      getItem: (name) => (items.has(name) ? items.get(name) : null),
+   496	      setItem: (name, value) => items.set(name, String(value)),
+   497	      removeItem: (name) => items.delete(name),
+   498	    };
+   499	  }
+   500	
+   501	  it('brings a request that was in flight back as an unknown outcome with the same course and key', () => {
+   502	    const storage = tabStorage();
+   503	    createBulkIssueStore(storage).submit(pendingApi(), attempt); // never answered: the page is reloaded first
+   504	
+   505	    const afterReload = createBulkIssueStore(storage);
+   506	    const { run, settled } = afterReload.read(ALICE);
+   507	    expect(run.status).toBe('failed');
+   508	    expect(run.attempt).toEqual(attempt);
+   509	    expect(run.error).toBeInstanceOf(ApiError);
+   510	    expect(run.error.message).toBe('The page was reloaded or left before the answer from the server arrived.');
+   511	    expect(writeOutcome(run.error)).toBe('unknown'); // "may or may not have gone through", with "Retry safely"
+   512	    expect(settled).toBe(0);
+   513	    expect(afterReload.read(BOB)).toEqual({ run: { status: 'idle' }, settled: 0 });
+   514	
+   515	    // the retry from the new page re-sends the same key
+   516	    const api = pendingApi();
+   517	    afterReload.submit(api, run.attempt);
+   518	    expect(api.bulkIssue).toHaveBeenCalledWith(1, 'key-1');
+   519	  });
+   520	
+   521	  it.each([
+   522	    ['a lost answer', new ApiError(0, 'network_error', 'The server could not be reached.'), 'unknown'],
+   523	    ['an HTTP 500', new ApiError(500, 'internal_error', 'Unexpected server error'), 'unknown'],
+   524	    ['a busy database', new ApiError(503, 'database_busy', 'The database is busy; retry the request shortly'), 'not_run'],
+   525	    ['an unexpected exception', new TypeError('x is undefined'), 'unknown'],
+   526	  ])('brings the retry prompt after %s back as it was', async (_case, error, outcome) => {
+   527	    const storage = tabStorage();
+   528	    const before = createBulkIssueStore(storage);
+   529	    const api = pendingApi();
+   530	    before.submit(api, attempt);
+   531	    api.calls[0].reject(error);
+   532	    await vi.waitFor(() => expect(before.read(ALICE).run.status).toBe('failed'));
+   533	
+   534	    const { run } = createBulkIssueStore(storage).read(ALICE);
+   535	    expect(run).toMatchObject({ status: 'failed', attempt });
+   536	    expect(run.error.message).toBe(error.message);
+   537	    expect(writeOutcome(run.error)).toBe(outcome);
+   538	  });
+   539	
+   540	  it('keeps nothing once the outcome is known: a result, a rejection, a dismissed prompt', async () => {
+   541	    const storage = tabStorage();
+   542	    const store = createBulkIssueStore(storage);
+   543	    const api = pendingApi();
+   544	
+   545	    store.submit(api, attempt);
+   546	    expect(storage.items.size).toBe(1); // on its way: kept
+   547	    api.calls[0].resolve({ operation, replayed: false });
+   548	    await vi.waitFor(() => expect(store.read(ALICE).run.status).toBe('succeeded'));
+   549	    expect(storage.items.size).toBe(0);
+   550	    expect(createBulkIssueStore(storage).read(ALICE).run.status).toBe('idle');
+   551	
+   552	    store.dismiss(ALICE);
+   553	    store.submit(api, attempt);
+   554	    api.calls[1].reject(new ApiError(409, 'idempotency_key_reused', 'reused'));
+   555	    await vi.waitFor(() => expect(store.read(ALICE).run.status).toBe('failed'));
+   556	    expect(storage.items.size).toBe(0); // rejected: nothing was written, the next attempt is a new operation
+   557	
+   558	    store.dismiss(ALICE);
+   559	    store.submit(api, attempt);
+   560	    api.calls[2].reject(new ApiError(0, 'network_error', 'offline'));
+   561	    await vi.waitFor(() => expect(store.read(ALICE).run.status).toBe('failed'));
+   562	    expect(storage.items.size).toBe(1); // waits for the retry: kept
+   563	    store.dismiss(ALICE); // the admin gives the attempt up
+   564	    expect(storage.items.size).toBe(0);
+   565	    expect(createBulkIssueStore(storage).read(ALICE).run.status).toBe('idle');
+   566	  });
+   567	
+   568	  it('keeps the attempts of two actors apart, also across the page load', async () => {
+   569	    const storage = tabStorage();
+   570	    const before = createBulkIssueStore(storage);
+   571	    const alice = pendingApi(ALICE);
+   572	    const bob = pendingApi(BOB);
+   573	    const bobsAttempt = { courseId: 4, courseTitle: 'Safety 101', key: 'key-bob' };
+   574	    before.submit(alice, attempt);
+   575	    before.submit(bob, bobsAttempt);
+   576	    bob.calls[0].resolve({ operation, replayed: false }); // Bob's is answered before the reload
+   577	    await vi.waitFor(() => expect(before.read(BOB).run.status).toBe('succeeded'));
+   578	
+   579	    const afterReload = createBulkIssueStore(storage);
+   580	    expect(afterReload.read(ALICE).run).toMatchObject({ status: 'failed', attempt });
+   581	    expect(afterReload.read(BOB).run.status).toBe('idle');
+   582	  });
+   583	
+   584	  it.each([
+   585	    ['text that is not JSON', '{"alice@east.test":'],
+   586	    ['JSON of another shape', '[1,2,3]'],
+   587	    ['null', 'null'],
+   588	    ['a record without a key', JSON.stringify({ [ALICE]: { attempt: { courseId: 1, courseTitle: 'Safety 101' } } })],
+   589	    ['a record that is not an object', JSON.stringify({ [ALICE]: 'pending' })],
+   590	  ])('starts empty when the storage holds %s', (_case, content) => {
+   591	    const storage = tabStorage({ 'cert-admin.bulk-issue.unsettled': content });
+   592	    const store = createBulkIssueStore(storage);
+   593	    expect(store.read(ALICE)).toEqual({ run: { status: 'idle' }, settled: 0 });
+   594	
+   595	    const api = pendingApi(); // and it works normally from there
+   596	    store.submit(api, attempt);
+   597	    expect(api.bulkIssue).toHaveBeenCalledTimes(1);
+   598	    expect(JSON.parse(storage.items.get('cert-admin.bulk-issue.unsettled'))).toEqual({ [ALICE]: { attempt } });
+   599	  });
+   600	
+   601	  it('works without a storage, and with one that refuses every access', async () => {
+   602	    const refusing = {
+   603	      getItem: () => {
+   604	        throw new DOMException('denied', 'SecurityError');
+   605	      },
+   606	      setItem: () => {
+   607	        throw new DOMException('full', 'QuotaExceededError');
+   608	      },
+   609	      removeItem: () => {
+   610	        throw new DOMException('denied', 'SecurityError');
+   611	      },
+   612	    };
+   613	    for (const storage of [null, refusing]) {
+   614	      const store = createBulkIssueStore(storage);
+   615	      const api = pendingApi();
+   616	      store.submit(api, attempt);
+   617	      store.submit(api, attempt);
+   618	      expect(api.bulkIssue).toHaveBeenCalledTimes(1);
+   619	      api.calls[0].resolve({ operation, replayed: false });
+   620	      await vi.waitFor(() => expect(store.read(ALICE).run.status).toBe('succeeded'));
+   621	      store.dismiss(ALICE);
+   622	      expect(store.read(ALICE).run.status).toBe('idle');
+   623	    }
+   624	  });
+   625	
+   626	  it('uses the sessionStorage of the tab unless told otherwise', () => {
+   627	    createBulkIssueStore().submit(pendingApi(), attempt);
+   628	    expect(JSON.parse(window.sessionStorage.getItem('cert-admin.bulk-issue.unsettled'))).toEqual({ [ALICE]: { attempt } });
+   629	    expect(window.localStorage.length).toBe(0); // per tab, and gone when the tab is closed
+   630	    expect(createBulkIssueStore().read(ALICE).run).toMatchObject({ status: 'failed', attempt });
+   631	  });
+   632	});

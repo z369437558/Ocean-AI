@@ -1,0 +1,1 @@
+{"agentType": "workflow-subagent", "isBuiltIn": true, "description": "audit:time-dst", "workflowPhase": "Audit", "spawnDepth": 1, "requestShape": "foreground", "requestNonInteractive": true, "model": "[REDACTED: model identifier A]", "pickedEffortModel": "[REDACTED: model identifier A]", "inWorkflowRun": true}

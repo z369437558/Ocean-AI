@@ -1,0 +1,655 @@
+=================== services/courses.js
+     1	/**
+     2	 * Courses and their rosters. The roster view is the "review completions" step: it shows, per
+     3	 * learner, exactly what a bulk issue would do, using the same classification the issue path uses.
+     4	 */
+     5	import { notFound } from '../lib/errors.js';
+     6	import { queryInteger } from '../lib/params.js';
+     7	import { localDateTime } from '../lib/time.js';
+     8	
+     9	export const SKIP_REASONS = Object.freeze({
+    10	  ALREADY_CERTIFIED: 'already_certified',
+    11	  CERTIFICATE_REVOKED: 'certificate_revoked',
+    12	  NOT_COMPLETED: 'not_completed',
+    13	});
+    14	
+    15	const ENROLLMENT_LABELS = { not_started: 'not started', in_progress: 'in progress', completed: 'completed' };
+    16	
+    17	/**
+    18	 * Decides what a bulk issue does with one roster row.
+    19	 * Eligible = enrollment completed and no certificate has ever been issued for (course, learner).
+    20	 */
+    21	export function classifyEnrollment(row) {
+    22	  if (row.certificate_id !== null && row.certificate_status === 'revoked') {
+    23	    return {
+    24	      eligible: false,
+    25	      reason: SKIP_REASONS.CERTIFICATE_REVOKED,
+    26	      message: `Certificate ${row.serial_number} was revoked; revoked certificates are not re-issued automatically`,
+    27	    };
+    28	  }
+    29	  if (row.certificate_id !== null) {
+    30	    return {
+    31	      eligible: false,
+    32	      reason: SKIP_REASONS.ALREADY_CERTIFIED,
+    33	      message: `Already certified (certificate ${row.serial_number})`,
+    34	    };
+    35	  }
+    36	  if (row.enrollment_status !== 'completed') {
+    37	    return {
+    38	      eligible: false,
+    39	      reason: SKIP_REASONS.NOT_COMPLETED,
+    40	      message: `Course not completed (enrollment is ${ENROLLMENT_LABELS[row.enrollment_status] ?? row.enrollment_status})`,
+    41	    };
+    42	  }
+    43	  return { eligible: true, reason: null, message: 'Completed, not yet certified' };
+    44	}
+    45	
+    46	const ROSTER_SQL = `
+    47	  SELECT e.id AS enrollment_id, e.status AS enrollment_status, e.completed_at,
+    48	         l.id AS learner_id, l.full_name AS learner_name,
+    49	         c.id AS certificate_id, c.serial_number, c.status AS certificate_status
+    50	    FROM enrollments e
+    51	    JOIN learners l ON l.id = e.learner_id AND l.tenant_id = e.tenant_id
+    52	    LEFT JOIN certificates c
+    53	           ON c.tenant_id = e.tenant_id AND c.course_id = e.course_id AND c.learner_id = e.learner_id
+    54	   WHERE e.tenant_id = @tenantId AND e.course_id = @courseId
+    55	   ORDER BY l.full_name COLLATE NOCASE, l.id`;
+    56	
+    57	/** Every enrollment of a course with its certificate (if any), in a stable order. */
+    58	export function loadRoster(db, tenantId, courseId) {
+    59	  return db.all(ROSTER_SQL, { tenantId, courseId });
+    60	}
+    61	
+    62	/** Looks a course up inside the actor's tenant only; other tenants' courses do not exist for them. */
+    63	export function findCourse(db, actor, courseId) {
+    64	  if (courseId === null) return null;
+    65	  const row = db.get('SELECT id, title FROM courses WHERE id = @courseId AND tenant_id = @tenantId', {
+    66	    courseId,
+    67	    tenantId: actor.tenantId,
+    68	  });
+    69	  return row ? { id: row.id, title: row.title } : null;
+    70	}
+    71	
+    72	export function listCourses(db, actor) {
+    73	  return db
+    74	    .all(
+    75	      `SELECT id, title, is_generated FROM courses WHERE tenant_id = @tenantId
+    76	        ORDER BY is_generated, title COLLATE NOCASE, id`,
+    77	      { tenantId: actor.tenantId },
+    78	    )
+    79	    .map((row) => ({ id: row.id, title: row.title, isGenerated: row.is_generated === 1 }));
+    80	}
+    81	
+    82	/** Roster page plus per-course totals for the bulk-issue screen. */
+    83	export function getCourseRoster(db, actor, courseId, query) {
+    84	  const page = queryInteger(query, ['page'], { min: 1, max: 1_000_000, fallback: 1 });
+    85	  const pageSize = queryInteger(query, ['pageSize', 'page_size', 'per_page', 'limit'], { min: 1, max: 100, fallback: 50 });
+    86	
+    87	  return db.transaction(
+    88	    () => {
+    89	      const course = findCourse(db, actor, courseId);
+    90	      if (!course) throw notFound('Course');
+    91	
+    92	      const params = { tenantId: actor.tenantId, courseId: course.id };
+    93	      const totals = db.get(
+    94	        `SELECT COUNT(*) AS enrolled,
+    95	                COALESCE(SUM(e.status = 'completed'), 0) AS completed,
+    96	                COALESCE(SUM(c.status = 'active'), 0) AS certified,
+    97	                COALESCE(SUM(c.status = 'revoked'), 0) AS revoked,
+    98	                COALESCE(SUM(e.status = 'completed' AND c.id IS NULL), 0) AS eligible
+    99	           FROM enrollments e
+   100	           LEFT JOIN certificates c
+   101	                  ON c.tenant_id = e.tenant_id AND c.course_id = e.course_id AND c.learner_id = e.learner_id
+   102	          WHERE e.tenant_id = @tenantId AND e.course_id = @courseId`,
+   103	        params,
+   104	      );
+   105	      const rows = db.all(`${ROSTER_SQL} LIMIT @limit OFFSET @offset`, {
+   106	        ...params,
+   107	        limit: pageSize,
+   108	        offset: (page - 1) * pageSize,
+   109	      });
+   110	
+   111	      return {
+   112	        course,
+   113	        summary: {
+   114	          enrolled: totals.enrolled,
+   115	          completed: totals.completed,
+   116	          incomplete: totals.enrolled - totals.completed,
+   117	          certified: totals.certified,
+   118	          revoked: totals.revoked,
+   119	          eligible: totals.eligible,
+   120	        },
+   121	        items: rows.map((row) => {
+   122	          const verdict = classifyEnrollment(row);
+   123	          return {
+   124	            learnerId: row.learner_id,
+   125	            learnerName: row.learner_name,
+   126	            enrollmentId: row.enrollment_id,
+   127	            enrollmentStatus: row.enrollment_status,
+   128	            completedAt: row.completed_at,
+   129	            completedLocal: row.completed_at ? localDateTime(row.completed_at, actor.timezone) : null,
+   130	            certificateId: row.certificate_id,
+   131	            serialNumber: row.serial_number,
+   132	            certificateStatus: row.certificate_status,
+   133	            eligible: verdict.eligible,
+   134	            reason: verdict.reason,
+   135	            message: verdict.message,
+   136	          };
+   137	        }),
+   138	        page,
+   139	        pageSize,
+   140	        total: totals.enrolled,
+   141	        totalPages: Math.max(1, Math.ceil(totals.enrolled / pageSize)),
+   142	      };
+   143	    },
+   144	    { immediate: false },
+   145	  );
+   146	}
+=================== services/ledger.js
+     1	/**
+     2	 * Low-level write primitives shared by the API, the demo seed and the load-test generator.
+     3	 * All of them expect to run inside a transaction owned by the caller.
+     4	 */
+     5	import { localDate, toUtcIso } from '../lib/time.js';
+     6	
+     7	export const AUDIT_ACTIONS = Object.freeze({
+     8	  ISSUED: 'certificate.issued',
+     9	  REVOKED: 'certificate.revoked',
+    10	});
+    11	
+    12	export function formatSerial(tenantCode, sequence) {
+    13	  return `${tenantCode}-${String(sequence).padStart(7, '0')}`;
+    14	}
+    15	
+    16	/** Reserves `count` consecutive serial numbers for a tenant and returns the first sequence value. */
+    17	export function reserveSerials(db, tenantId, count = 1) {
+    18	  const { changes } = db.run('UPDATE tenants SET last_serial = last_serial + @count WHERE id = @tenantId', {
+    19	    count,
+    20	    tenantId,
+    21	  });
+    22	  if (changes !== 1) throw new Error(`Unknown tenant ${tenantId}`);
+    23	  const { last_serial: last } = db.get('SELECT last_serial FROM tenants WHERE id = @tenantId', { tenantId });
+    24	  return last - count + 1;
+    25	}
+    26	
+    27	export function recordAuditEvent(db, event) {
+    28	  return db.run(
+    29	    `INSERT INTO audit_events (tenant_id, actor_admin_id, actor_email, action, certificate_id, bulk_operation_id, details, created_at)
+    30	     VALUES (@tenantId, @actorAdminId, @actorEmail, @action, @certificateId, @bulkOperationId, @details, @createdAt)`,
+    31	    {
+    32	      tenantId: event.tenantId,
+    33	      actorAdminId: event.actorAdminId ?? null,
+    34	      actorEmail: event.actorEmail,
+    35	      action: event.action,
+    36	      certificateId: event.certificateId,
+    37	      bulkOperationId: event.bulkOperationId ?? null,
+    38	      details: JSON.stringify(event.details ?? {}),
+    39	      createdAt: event.createdAt,
+    40	    },
+    41	  ).lastInsertRowid;
+    42	}
+    43	
+    44	/**
+    45	 * Issues one certificate and writes its `certificate.issued` audit event.
+    46	 *
+    47	 * `tenant` is `{ id, code, timezone }`, `actor` is `{ adminId, email }`.
+    48	 * Throws if the learner already has a certificate for the course (UNIQUE constraint).
+    49	 */
+    50	export function issueCertificate(db, { tenant, actor, course, learner, enrollmentId, issuedAt, bulkOperationId = null, auditDetails = {} }) {
+    51	  const issuedAtIso = toUtcIso(issuedAt);
+    52	  const serialNumber = formatSerial(tenant.code, reserveSerials(db, tenant.id, 1));
+    53	  const certificateId = db.run(
+    54	    `INSERT INTO certificates (tenant_id, course_id, learner_id, enrollment_id, serial_number, learner_name, course_title,
+    55	                               status, issued_at, issued_local_date, issued_by_admin_id, bulk_operation_id)
+    56	     VALUES (@tenantId, @courseId, @learnerId, @enrollmentId, @serialNumber, @learnerName, @courseTitle,
+    57	             'active', @issuedAt, @issuedLocalDate, @issuedByAdminId, @bulkOperationId)`,
+    58	    {
+    59	      tenantId: tenant.id,
+    60	      courseId: course.id,
+    61	      learnerId: learner.id,
+    62	      enrollmentId: enrollmentId ?? null,
+    63	      serialNumber,
+    64	      learnerName: learner.name,
+    65	      courseTitle: course.title,
+    66	      issuedAt: issuedAtIso,
+    67	      issuedLocalDate: localDate(issuedAtIso, tenant.timezone),
+    68	      issuedByAdminId: actor.adminId ?? null,
+    69	      bulkOperationId,
+    70	    },
+    71	  ).lastInsertRowid;
+    72	
+    73	  recordAuditEvent(db, {
+    74	    tenantId: tenant.id,
+    75	    actorAdminId: actor.adminId,
+    76	    actorEmail: actor.email,
+    77	    action: AUDIT_ACTIONS.ISSUED,
+    78	    certificateId,
+    79	    bulkOperationId,
+    80	    createdAt: issuedAtIso,
+    81	    details: {
+    82	      serialNumber,
+    83	      learnerId: learner.id,
+    84	      learnerName: learner.name,
+    85	      courseId: course.id,
+    86	      courseTitle: course.title,
+    87	      ...auditDetails,
+    88	    },
+    89	  });
+    90	
+    91	  return { id: certificateId, serialNumber, issuedAt: issuedAtIso };
+    92	}
+    93	
+    94	/**
+    95	 * Revokes an active certificate and writes its `certificate.revoked` audit event.
+    96	 * Returns false (and writes nothing) when the certificate is not active any more, which is what
+    97	 * makes repeated or racing revoke requests harmless.
+    98	 */
+    99	export function revokeCertificate(db, { tenantId, certificateId, actor, revokedAt, reason = null }) {
+   100	  const revokedAtIso = toUtcIso(revokedAt);
+   101	  const { changes } = db.run(
+   102	    `UPDATE certificates
+   103	        SET status = 'revoked', revoked_at = @revokedAt, revoked_by_admin_id = @adminId, revocation_reason = @reason
+   104	      WHERE id = @certificateId AND tenant_id = @tenantId AND status = 'active'`,
+   105	    { revokedAt: revokedAtIso, adminId: actor.adminId ?? null, reason, certificateId, tenantId },
+   106	  );
+   107	  if (changes !== 1) return false;
+   108	
+   109	  const { serial_number: serialNumber } = db.get('SELECT serial_number FROM certificates WHERE id = @certificateId', {
+   110	    certificateId,
+   111	  });
+   112	  recordAuditEvent(db, {
+   113	    tenantId,
+   114	    actorAdminId: actor.adminId,
+   115	    actorEmail: actor.email,
+   116	    action: AUDIT_ACTIONS.REVOKED,
+   117	    certificateId,
+   118	    createdAt: revokedAtIso,
+   119	    details: { serialNumber, reason, previousStatus: 'active' },
+   120	  });
+   121	  return true;
+   122	}
+=================== db/schema.js
+     1	/**
+     2	 * Database schema.
+     3	 *
+     4	 * Tenant isolation is enforced twice: every query in the service layer is scoped by the actor's
+     5	 * tenant, and the schema itself refuses cross-tenant rows - every reference between tenant-owned
+     6	 * tables is a composite `(id, tenant_id)` foreign key, so a certificate in one tenant can never
+     7	 * point at a course, learner, enrollment, admin or bulk operation of another, and an audit event
+     8	 * can never point at another tenant's certificate.
+     9	 */
+    10	
+    11	/** Bump whenever SCHEMA_SQL changes; a database file from another version is refused at start-up. */
+    12	export const SCHEMA_VERSION = 2;
+    13	
+    14	const SCHEMA_SQL = `
+    15	CREATE TABLE tenants (
+    16	  id          INTEGER PRIMARY KEY,
+    17	  name        TEXT    NOT NULL UNIQUE,
+    18	  code        TEXT    NOT NULL UNIQUE,            -- serial-number prefix, e.g. EAST
+    19	  timezone    TEXT    NOT NULL,                   -- IANA zone, e.g. Australia/Sydney
+    20	  last_serial INTEGER NOT NULL DEFAULT 0,         -- per-tenant serial counter
+    21	  created_at  TEXT    NOT NULL
+    22	) STRICT;
+    23	
+    24	CREATE TABLE admins (
+    25	  id           INTEGER PRIMARY KEY,
+    26	  tenant_id    INTEGER NOT NULL REFERENCES tenants (id),
+    27	  email        TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    28	  display_name TEXT    NOT NULL,
+    29	  created_at   TEXT    NOT NULL,
+    30	  UNIQUE (id, tenant_id)
+    31	) STRICT;
+    32	
+    33	CREATE TABLE courses (
+    34	  id           INTEGER PRIMARY KEY,
+    35	  tenant_id    INTEGER NOT NULL REFERENCES tenants (id),
+    36	  title        TEXT    NOT NULL CHECK (length(trim(title)) > 0),
+    37	  is_generated INTEGER NOT NULL DEFAULT 0 CHECK (is_generated IN (0, 1)),  -- 1 = load-test data
+    38	  created_at   TEXT    NOT NULL,
+    39	  UNIQUE (tenant_id, title),
+    40	  UNIQUE (id, tenant_id)
+    41	) STRICT;
+    42	
+    43	CREATE TABLE learners (
+    44	  id           INTEGER PRIMARY KEY,
+    45	  tenant_id    INTEGER NOT NULL REFERENCES tenants (id),
+    46	  full_name    TEXT    NOT NULL,
+    47	  email        TEXT,
+    48	  is_generated INTEGER NOT NULL DEFAULT 0 CHECK (is_generated IN (0, 1)),
+    49	  created_at   TEXT    NOT NULL,
+    50	  UNIQUE (id, tenant_id)
+    51	) STRICT;
+    52	CREATE INDEX idx_learners_tenant ON learners (tenant_id, is_generated);
+    53	
+    54	CREATE TABLE enrollments (
+    55	  id           INTEGER PRIMARY KEY,
+    56	  tenant_id    INTEGER NOT NULL,
+    57	  course_id    INTEGER NOT NULL,
+    58	  learner_id   INTEGER NOT NULL,
+    59	  status       TEXT    NOT NULL CHECK (status IN ('not_started', 'in_progress', 'completed')),
+    60	  completed_at TEXT,
+    61	  created_at   TEXT    NOT NULL,
+    62	  UNIQUE (tenant_id, course_id, learner_id),
+    63	  UNIQUE (id, tenant_id),
+    64	  CHECK ((status = 'completed') = (completed_at IS NOT NULL)),
+    65	  FOREIGN KEY (course_id, tenant_id)  REFERENCES courses (id, tenant_id),
+    66	  FOREIGN KEY (learner_id, tenant_id) REFERENCES learners (id, tenant_id)
+    67	) STRICT;
+    68	CREATE INDEX idx_enrollments_learner ON enrollments (learner_id);
+    69	
+    70	-- One row per bulk-issue request that actually executed. It doubles as the idempotency record:
+    71	-- response_body is replayed verbatim to every retry that carries the same key and payload.
+    72	CREATE TABLE bulk_issue_operations (
+    73	  id               INTEGER PRIMARY KEY,
+    74	  tenant_id        INTEGER NOT NULL,
+    75	  actor_admin_id   INTEGER NOT NULL,
+    76	  course_id        INTEGER NOT NULL,
+    77	  idempotency_key  TEXT,
+    78	  request_hash     TEXT    NOT NULL,
+    79	  status           TEXT    NOT NULL CHECK (status IN ('running', 'completed')),
+    80	  issued_count     INTEGER NOT NULL DEFAULT 0,
+    81	  skipped_count    INTEGER NOT NULL DEFAULT 0,
+    82	  failed_count     INTEGER NOT NULL DEFAULT 0,
+    83	  response_status  INTEGER,
+    84	  response_body    TEXT,
+    85	  created_at       TEXT    NOT NULL,
+    86	  completed_at     TEXT,
+    87	  UNIQUE (id, tenant_id),
+    88	  FOREIGN KEY (actor_admin_id, tenant_id) REFERENCES admins (id, tenant_id),
+    89	  FOREIGN KEY (course_id, tenant_id)      REFERENCES courses (id, tenant_id)
+    90	) STRICT;
+    91	CREATE UNIQUE INDEX idx_bulk_ops_idempotency
+    92	  ON bulk_issue_operations (tenant_id, actor_admin_id, idempotency_key)
+    93	  WHERE idempotency_key IS NOT NULL;
+    94	CREATE INDEX idx_bulk_ops_tenant ON bulk_issue_operations (tenant_id, id);
+    95	CREATE INDEX idx_bulk_ops_course ON bulk_issue_operations (course_id);
+    96	
+    97	CREATE TABLE certificates (
+    98	  id                  INTEGER PRIMARY KEY,
+    99	  tenant_id           INTEGER NOT NULL,
+   100	  course_id           INTEGER NOT NULL,
+   101	  learner_id          INTEGER NOT NULL,
+   102	  enrollment_id       INTEGER,
+   103	  serial_number       TEXT    NOT NULL UNIQUE,
+   104	  -- Names are snapshotted: a certificate is an issued document and must not change when the
+   105	  -- learner or course is renamed. It also keeps list/search/export free of joins.
+   106	  learner_name        TEXT    NOT NULL CHECK (length(trim(learner_name)) > 0),
+   107	  course_title        TEXT    NOT NULL CHECK (length(trim(course_title)) > 0),
+   108	  status              TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
+   109	  issued_at           TEXT    NOT NULL,           -- UTC instant, ISO-8601 (source of truth)
+   110	  -- Calendar date of issued_at in the tenant's time zone, materialised at issue time so that
+   111	  -- "sort by issue date" is index-backed and follows the tenant-local calendar, not UTC.
+   112	  issued_local_date   TEXT    NOT NULL CHECK (issued_local_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+   113	  issued_by_admin_id  INTEGER,
+   114	  bulk_operation_id   INTEGER,
+   115	  revoked_at          TEXT,
+   116	  revoked_by_admin_id INTEGER,
+   117	  revocation_reason   TEXT,
+   118	  -- At most one certificate per learner per course, ever. This is the last line of defence
+   119	  -- against double issuance, whatever the application layer does.
+   120	  UNIQUE (tenant_id, course_id, learner_id),
+   121	  UNIQUE (id, tenant_id),
+   122	  CHECK ((status = 'revoked') = (revoked_at IS NOT NULL)),
+   123	  FOREIGN KEY (course_id, tenant_id)           REFERENCES courses (id, tenant_id),
+   124	  FOREIGN KEY (learner_id, tenant_id)          REFERENCES learners (id, tenant_id),
+   125	  FOREIGN KEY (enrollment_id, tenant_id)       REFERENCES enrollments (id, tenant_id),
+   126	  FOREIGN KEY (issued_by_admin_id, tenant_id)  REFERENCES admins (id, tenant_id),
+   127	  FOREIGN KEY (bulk_operation_id, tenant_id)   REFERENCES bulk_issue_operations (id, tenant_id),
+   128	  FOREIGN KEY (revoked_by_admin_id, tenant_id) REFERENCES admins (id, tenant_id)
+   129	) STRICT;
+   130	-- One index per sort order, each ending in id: the deterministic tie-breaker for equal sort keys.
+   131	CREATE INDEX idx_certificates_issued  ON certificates (tenant_id, issued_local_date, issued_at, id);
+   132	CREATE INDEX idx_certificates_learner ON certificates (tenant_id, learner_name COLLATE NOCASE, id);
+   133	CREATE INDEX idx_certificates_course  ON certificates (tenant_id, course_title COLLATE NOCASE, id);
+   134	CREATE INDEX idx_certificates_serial  ON certificates (tenant_id, serial_number, id);
+   135	CREATE INDEX idx_certificates_status  ON certificates (tenant_id, status, id);
+   136	CREATE INDEX idx_certificates_learner_id ON certificates (learner_id);
+   137	CREATE INDEX idx_certificates_enrollment ON certificates (enrollment_id);
+   138	CREATE INDEX idx_certificates_bulk_op ON certificates (bulk_operation_id) WHERE bulk_operation_id IS NOT NULL;
+   139	
+   140	-- Append-only audit trail. Exactly one row per certificate issuance and per effective revocation.
+   141	CREATE TABLE audit_events (
+   142	  id                INTEGER PRIMARY KEY,
+   143	  tenant_id         INTEGER NOT NULL REFERENCES tenants (id),
+   144	  actor_admin_id    INTEGER,
+   145	  actor_email       TEXT    NOT NULL,
+   146	  action            TEXT    NOT NULL CHECK (action IN ('certificate.issued', 'certificate.revoked')),
+   147	  certificate_id    INTEGER NOT NULL,
+   148	  bulk_operation_id INTEGER,
+   149	  details           TEXT    NOT NULL DEFAULT '{}',
+   150	  created_at        TEXT    NOT NULL,
+   151	  FOREIGN KEY (actor_admin_id, tenant_id)    REFERENCES admins (id, tenant_id),
+   152	  FOREIGN KEY (certificate_id, tenant_id)    REFERENCES certificates (id, tenant_id),
+   153	  FOREIGN KEY (bulk_operation_id, tenant_id) REFERENCES bulk_issue_operations (id, tenant_id)
+   154	) STRICT;
+   155	CREATE INDEX idx_audit_tenant      ON audit_events (tenant_id, id);
+   156	CREATE INDEX idx_audit_certificate ON audit_events (certificate_id, id);
+   157	CREATE INDEX idx_audit_bulk_op     ON audit_events (bulk_operation_id) WHERE bulk_operation_id IS NOT NULL;
+   158	`;
+   159	
+   160	const readVersion = (db) => db.get('PRAGMA user_version').user_version;
+   161	
+   162	/** Creates the schema on an empty database; a no-op when it is already at the current version. */
+   163	export function migrate(db) {
+   164	  if (readVersion(db) === SCHEMA_VERSION) return;
+   165	  db.transaction(() => {
+   166	    // Look again now that the write lock is held: another process starting at the same moment
+   167	    // may have created the schema while this one was waiting.
+   168	    const version = readVersion(db);
+   169	    if (version === SCHEMA_VERSION) return;
+   170	    if (version !== 0) {
+   171	      throw new Error(
+   172	        `Database schema version ${version} is not supported by this build (expected ${SCHEMA_VERSION}). ` +
+   173	          'Stop the server and run "npm run db:reset" to recreate the demo database.',
+   174	      );
+   175	    }
+   176	    db.exec(SCHEMA_SQL);
+   177	    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+   178	  });
+   179	}
+=================== db/seed.js
+     1	/**
+     2	 * Quick-start demo data: two tenants, one admin each, a handful of courses and learners.
+     3	 *
+     4	 * Both tenants have a "Safety 101" course whose roster covers every bulk-issue outcome
+     5	 * (already certified, completed and eligible, incomplete), and both have a learner called
+     6	 * "Alex Lee" who holds a Safety 101 certificate issued at 2026-01-10T13:30:00Z - an instant that
+     7	 * falls on different calendar days in Sydney (AEDT, +11:00) and Perth (AWST, +08:00).
+     8	 *
+     9	 * All timestamps are fixed, so a freshly seeded database is identical on every machine.
+    10	 */
+    11	import { isValidTimeZone } from '../lib/time.js';
+    12	import { issueCertificate, revokeCertificate } from '../services/ledger.js';
+    13	
+    14	export const DEMO_REFERENCE_INSTANT = '2026-01-10T13:30:00.000Z';
+    15	
+    16	const SEEDED_AT = '2026-01-05T00:00:00.000Z';
+    17	
+    18	/** Enrollment shorthand: [learner, status, completedAt?, certificate?] */
+    19	const DEMO_TENANTS = [
+    20	  {
+    21	    name: 'East',
+    22	    code: 'EAST',
+    23	    timezone: 'Australia/Sydney',
+    24	    admin: { email: 'alice@east.test', displayName: 'Alice (East admin)' },
+    25	    learners: ['Alex Lee', 'Priya Sharma', "Marcus O'Connor", 'Mei Chen', 'Tom Walker', 'Sofia Rossi', 'José Álvarez'],
+    26	    courses: [
+    27	      {
+    28	        title: 'Safety 101',
+    29	        enrollments: [
+    30	          // already certified - the DST reference certificate (Sydney: 2026-01-11 00:30)
+    31	          ['Alex Lee', 'completed', '2026-01-09T04:10:00.000Z', { issuedAt: DEMO_REFERENCE_INSTANT }],
+    32	          ['Priya Sharma', 'completed', '2026-11-17T23:40:00.000Z'], // eligible
+    33	          ["Marcus O'Connor", 'completed', '2026-11-19T02:05:00.000Z'], // eligible
+    34	          ['Mei Chen', 'in_progress'], // incomplete
+    35	          ['Tom Walker', 'not_started'], // incomplete
+    36	        ],
+    37	      },
+    38	      {
+    39	        title: 'First Aid Refresher',
+    40	        enrollments: [
+    41	          ['Alex Lee', 'completed', '2026-11-12T05:30:00.000Z'], // eligible
+    42	          [
+    43	            'Mei Chen',
+    44	            'completed',
+    45	            '2026-02-13T03:00:00.000Z',
+    46	            {
+    47	              issuedAt: '2026-02-14T22:15:00.000Z',
+    48	              revoked: { at: '2026-03-02T01:00:00.000Z', reason: 'Issued in error: assessment was not signed off' },
+    49	            },
+    50	          ],
+    51	          // These two straddle the end of daylight saving in Sydney (2026-04-05 03:00 AEDT -> 02:00 AEST):
+    52	          // one hour apart in UTC, yet both read "2026-04-05 02:30" on the wall clock.
+    53	          ['Sofia Rossi', 'completed', '2026-04-03T06:00:00.000Z', { issuedAt: '2026-04-04T15:30:00.000Z' }],
+    54	          ['José Álvarez', 'completed', '2026-04-03T07:20:00.000Z', { issuedAt: '2026-04-04T16:30:00.000Z' }],
+    55	          ['Priya Sharma', 'in_progress'],
+    56	        ],
+    57	      },
+    58	      {
+    59	        title: 'Forklift Operations',
+    60	        enrollments: [
+    61	          ['Alex Lee', 'in_progress'], // incomplete
+    62	          ['Priya Sharma', 'completed', '2026-06-12T01:00:00.000Z', { issuedAt: '2026-06-15T02:00:00.000Z' }],
+    63	          // ...and these two straddle the start of daylight saving (2026-10-04 02:00 AEST -> 03:00 AEDT).
+    64	          ["Marcus O'Connor", 'completed', '2026-10-01T03:30:00.000Z', { issuedAt: '2026-10-03T15:30:00.000Z' }],
+    65	          ['Tom Walker', 'completed', '2026-10-02T00:45:00.000Z', { issuedAt: '2026-10-03T16:30:00.000Z' }],
+    66	          ['Sofia Rossi', 'not_started'],
+    67	        ],
+    68	      },
+    69	    ],
+    70	  },
+    71	  {
+    72	    name: 'West',
+    73	    code: 'WEST',
+    74	    timezone: 'Australia/Perth',
+    75	    admin: { email: 'bob@west.test', displayName: 'Bob (West admin)' },
+    76	    learners: ['Alex Lee', 'Jordan Smith', 'Emily Davis', 'Noah Wilson', 'Grace Kim', 'Liam Brown'],
+    77	    courses: [
+    78	      {
+    79	        title: 'Safety 101',
+    80	        enrollments: [
+    81	          // already certified - same UTC instant as East's Alex Lee (Perth: 2026-01-10 21:30)
+    82	          ['Alex Lee', 'completed', '2026-01-09T06:00:00.000Z', { issuedAt: DEMO_REFERENCE_INSTANT }],
+    83	          ['Jordan Smith', 'completed', '2026-11-16T07:15:00.000Z'], // eligible
+    84	          ['Emily Davis', 'completed', '2026-11-18T03:50:00.000Z'], // eligible
+    85	          ['Noah Wilson', 'in_progress'], // incomplete
+    86	          ['Grace Kim', 'not_started'], // incomplete
+    87	        ],
+    88	      },
+    89	      {
+    90	        title: 'Working at Heights',
+    91	        enrollments: [
+    92	          ['Alex Lee', 'completed', '2026-11-10T02:00:00.000Z'], // eligible
+    93	          ['Liam Brown', 'completed', '2026-03-19T08:00:00.000Z', { issuedAt: '2026-03-20T17:45:00.000Z' }],
+    94	          [
+    95	            'Grace Kim',
+    96	            'completed',
+    97	            '2026-07-30T05:00:00.000Z',
+    98	            {
+    99	              issuedAt: '2026-08-01T03:00:00.000Z',
+   100	              revoked: { at: '2026-08-20T06:30:00.000Z', reason: 'Practical assessment failed on review' },
+   101	            },
+   102	          ],
+   103	          ['Jordan Smith', 'in_progress'],
+   104	        ],
+   105	      },
+   106	      {
+   107	        title: 'Manual Handling',
+   108	        enrollments: [
+   109	          ['Alex Lee', 'in_progress'], // incomplete
+   110	          ['Emily Davis', 'completed', '2026-09-11T04:00:00.000Z', { issuedAt: '2026-09-12T10:20:00.000Z' }],
+   111	          ['Noah Wilson', 'not_started'],
+   112	        ],
+   113	      },
+   114	    ],
+   115	  },
+   116	];
+   117	
+   118	export function isSeeded(db) {
+   119	  return db.get('SELECT COUNT(*) AS n FROM tenants').n > 0;
+   120	}
+   121	
+   122	function insertDemoTenant(db, spec) {
+   123	  if (!isValidTimeZone(spec.timezone)) throw new Error(`Unknown IANA time zone "${spec.timezone}" for tenant ${spec.name}`);
+   124	  const tenantId = db.run(
+   125	    'INSERT INTO tenants (name, code, timezone, created_at) VALUES (@name, @code, @timezone, @createdAt)',
+   126	    { name: spec.name, code: spec.code, timezone: spec.timezone, createdAt: SEEDED_AT },
+   127	  ).lastInsertRowid;
+   128	  const tenant = { id: tenantId, code: spec.code, timezone: spec.timezone };
+   129	
+   130	  const adminId = db.run(
+   131	    'INSERT INTO admins (tenant_id, email, display_name, created_at) VALUES (@tenantId, @email, @displayName, @createdAt)',
+   132	    { tenantId, email: spec.admin.email, displayName: spec.admin.displayName, createdAt: SEEDED_AT },
+   133	  ).lastInsertRowid;
+   134	  const actor = { adminId, email: spec.admin.email };
+   135	
+   136	  const learners = new Map();
+   137	  for (const name of spec.learners) {
+   138	    const id = db.run(
+   139	      'INSERT INTO learners (tenant_id, full_name, email, created_at) VALUES (@tenantId, @name, @email, @createdAt)',
+   140	      {
+   141	        tenantId,
+   142	        name,
+   143	        email: `${name.toLowerCase().normalize('NFD').replace(/[^a-z ]/g, '').trim().replace(/ +/g, '.')}@${spec.name.toLowerCase()}.test`,
+   144	        createdAt: SEEDED_AT,
+   145	      },
+   146	    ).lastInsertRowid;
+   147	    learners.set(name, { id, name });
+   148	  }
+   149	
+   150	  const pendingCertificates = [];
+   151	  for (const courseSpec of spec.courses) {
+   152	    const courseId = db.run(
+   153	      'INSERT INTO courses (tenant_id, title, created_at) VALUES (@tenantId, @title, @createdAt)',
+   154	      { tenantId, title: courseSpec.title, createdAt: SEEDED_AT },
+   155	    ).lastInsertRowid;
+   156	    const course = { id: courseId, title: courseSpec.title };
+   157	
+   158	    for (const [learnerName, status, completedAt = null, certificate = null] of courseSpec.enrollments) {
+   159	      const learner = learners.get(learnerName);
+   160	      if (!learner) throw new Error(`Seed refers to unknown learner "${learnerName}"`);
+   161	      const enrollmentId = db.run(
+   162	        `INSERT INTO enrollments (tenant_id, course_id, learner_id, status, completed_at, created_at)
+   163	         VALUES (@tenantId, @courseId, @learnerId, @status, @completedAt, @createdAt)`,
+   164	        { tenantId, courseId, learnerId: learner.id, status, completedAt, createdAt: SEEDED_AT },
+   165	      ).lastInsertRowid;
+   166	      if (certificate) pendingCertificates.push({ course, learner, enrollmentId, ...certificate });
+   167	    }
+   168	  }
+   169	
+   170	  // Issue in chronological order so serial numbers and ids follow the timeline, as they would in real use.
+   171	  pendingCertificates.sort((a, b) => a.issuedAt.localeCompare(b.issuedAt));
+   172	  for (const pending of pendingCertificates) {
+   173	    const { id } = issueCertificate(db, {
+   174	      tenant,
+   175	      actor,
+   176	      course: pending.course,
+   177	      learner: pending.learner,
+   178	      enrollmentId: pending.enrollmentId,
+   179	      issuedAt: pending.issuedAt,
+   180	      auditDetails: { source: 'demo-seed' },
+   181	    });
+   182	    if (pending.revoked) {
+   183	      revokeCertificate(db, {
+   184	        tenantId,
+   185	        certificateId: id,
+   186	        actor,
+   187	        revokedAt: pending.revoked.at,
+   188	        reason: pending.revoked.reason,
+   189	      });
+   190	    }
+   191	  }
+   192	}
+   193	
+   194	/**
+   195	 * Inserts the demo dataset into an empty database and returns true. Returns false, changing
+   196	 * nothing, when data is already there - including when another process seeded it a moment ago.
+   197	 */
+   198	export function seedDemoData(db) {
+   199	  return db.transaction(() => {
+   200	    if (isSeeded(db)) return false;
+   201	    for (const tenant of DEMO_TENANTS) insertDemoTenant(db, tenant);
+   202	    return true;
+   203	  });
+   204	}

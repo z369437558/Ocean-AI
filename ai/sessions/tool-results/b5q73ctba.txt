@@ -1,0 +1,839 @@
+=================== components/BulkIssuePage.jsx
+     1	import { useState } from 'react';
+     2	
+     3	import { writeOutcome } from '../api.js';
+     4	import { useBulkIssue } from '../bulkIssueStore.js';
+     5	import { useQuery } from '../hooks.js';
+     6	import { EmptyState, ErrorState, OutcomeBadge, Pagination, Spinner, StatusBadge } from './ui.jsx';
+     7	
+     8	const ENROLLMENT_LABELS = { not_started: 'Not started', in_progress: 'In progress', completed: 'Completed' };
+     9	const RESULT_PREVIEW_ROWS = 200;
+    10	
+    11	/** One key per user-initiated operation; a retry of that operation re-sends the same key. */
+    12	function newIdempotencyKey() {
+    13	  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+    14	  // crypto.randomUUID needs a secure context; getRandomValues works on plain http://host:port too.
+    15	  const bytes = crypto.getRandomValues(new Uint8Array(16));
+    16	  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    17	  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    18	  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    19	  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    20	}
+    21	
+    22	function OperationResult({ operation, replayed, onDismiss, headingId = 'result-heading' }) {
+    23	  const [filter, setFilter] = useState('all');
+    24	  const [showAll, setShowAll] = useState(false);
+    25	  const { summary } = operation;
+    26	  const matching = filter === 'all' ? operation.results : operation.results.filter((result) => result.outcome === filter);
+    27	  const visible = showAll ? matching : matching.slice(0, RESULT_PREVIEW_ROWS);
+    28	
+    29	  return (
+    30	    <section className="panel" aria-labelledby={headingId} data-testid="operation-result">
+    31	      <div className="panel-header">
+    32	        <div>
+    33	          {/* Focusable by script only: see viewOperation in BulkIssuePage. */}
+    34	          <h2 id={headingId} tabIndex={-1}>
+    35	            Operation #{operation.id} · {operation.course.title}
+    36	          </h2>
+    37	          <p className="muted">
+    38	            <span className="badge badge-active">Completed</span> requested by {operation.requestedBy} · idempotency key{' '}
+    39	            <span className="mono small">{operation.idempotencyKey ?? 'none'}</span>
+    40	          </p>
+    41	        </div>
+    42	        <button type="button" className="btn btn-small" onClick={onDismiss}>
+    43	          Dismiss
+    44	        </button>
+    45	      </div>
+    46	
+    47	      {replayed ? (
+    48	        <p className="note" data-testid="operation-replayed">
+    49	          The server recognised this request as a repeat of an earlier one and returned the stored result. Nothing was
+    50	          issued twice.
+    51	        </p>
+    52	      ) : null}
+    53	
+    54	      <div className="tiles" data-testid="operation-summary">
+    55	        <div className="tile tile-issued">
+    56	          <span className="tile-value" data-testid="summary-issued">
+    57	            {summary.issued}
+    58	          </span>
+    59	          <span className="tile-label">Issued</span>
+    60	        </div>
+    61	        <div className="tile tile-skipped">
+    62	          <span className="tile-value" data-testid="summary-skipped">
+    63	            {summary.skipped}
+    64	          </span>
+    65	          <span className="tile-label">Skipped</span>
+    66	        </div>
+    67	        <div className="tile tile-failed">
+    68	          <span className="tile-value" data-testid="summary-failed">
+    69	            {summary.failed}
+    70	          </span>
+    71	          <span className="tile-label">Failed</span>
+    72	        </div>
+    73	      </div>
+    74	
+    75	      {summary.failed > 0 ? (
+    76	        <p className="note note-error">
+    77	          {summary.failed} learner{summary.failed === 1 ? '' : 's'} could not be certified. Everyone else was processed
+    78	          normally; start a new bulk issue to try the failed learner{summary.failed === 1 ? '' : 's'} again.
+    79	        </p>
+    80	      ) : null}
+    81	
+    82	      <div className="chips" role="group" aria-label="Filter outcomes">
+    83	        {[
+    84	          ['all', `All (${summary.total})`],
+    85	          ['issued', `Issued (${summary.issued})`],
+    86	          ['skipped', `Skipped (${summary.skipped})`],
+    87	          ['failed', `Failed (${summary.failed})`],
+    88	        ].map(([value, label]) => (
+    89	          <button
+    90	            key={value}
+    91	            type="button"
+    92	            className={filter === value ? 'chip chip-active' : 'chip'}
+    93	            aria-pressed={filter === value}
+    94	            onClick={() => setFilter(value)}
+    95	          >
+    96	            {label}
+    97	          </button>
+    98	        ))}
+    99	      </div>
+   100	
+   101	      {matching.length === 0 ? (
+   102	        <EmptyState title="No learners with this outcome" />
+   103	      ) : (
+   104	        <div className="table-wrap">
+   105	          <table className="data-table">
+   106	            <thead>
+   107	              <tr>
+   108	                <th scope="col">Learner</th>
+   109	                <th scope="col">Outcome</th>
+   110	                <th scope="col">Details</th>
+   111	              </tr>
+   112	            </thead>
+   113	            <tbody>
+   114	              {visible.map((result) => (
+   115	                <tr key={result.learnerId} data-outcome={result.outcome}>
+   116	                  <td>{result.learnerName}</td>
+   117	                  <td>
+   118	                    <OutcomeBadge outcome={result.outcome} />
+   119	                  </td>
+   120	                  <td>
+   121	                    {result.outcome === 'issued' ? (
+   122	                      <>
+   123	                        Certificate{' '}
+   124	                        <a className="mono" href={`#/certificates/${result.certificateId}`}>
+   125	                          {result.serialNumber}
+   126	                        </a>{' '}
+   127	                        issued {result.issuedLocal}
+   128	                      </>
+   129	                    ) : (
+   130	                      result.message
+   131	                    )}
+   132	                  </td>
+   133	                </tr>
+   134	              ))}
+   135	            </tbody>
+   136	          </table>
+   137	        </div>
+   138	      )}
+   139	      {matching.length > visible.length ? (
+   140	        <p className="muted">
+   141	          Showing the first {visible.length.toLocaleString('en-US')} of {matching.length.toLocaleString('en-US')} learners.{' '}
+   142	          <button type="button" className="link" onClick={() => setShowAll(true)}>
+   143	            Show all
+   144	          </button>
+   145	        </p>
+   146	      ) : null}
+   147	    </section>
+   148	  );
+   149	}
+   150	
+   151	export default function BulkIssuePage({ api, actor, bulkIssues }) {
+   152	  // run: idle | submitting | succeeded | failed. `attempt` = { courseId, courseTitle, key }.
+   153	  // The run, its key and the in-flight lock live in the store above the routed pages, so they are
+   154	  // still there when this page is left and opened again (see bulkIssueStore.js).
+   155	  const { run, settled } = useBulkIssue(bulkIssues, actor.email);
+   156	
+   157	  const courses = useQuery((signal) => api.listCourses(signal), [api]);
+   158	  // `settled` moves whenever a bulk issue of this actor finishes - also one that was started
+   159	  // before this page was (re)opened - so the history and the roster below are fetched again.
+   160	  const operations = useQuery((signal) => api.listOperations(signal), [api, settled]);
+   161	
+   162	  // Coming back to a run that is pending or still on display: start on the course it is about.
+   163	  const [courseId, setCourseId] = useState(() => (run.status === 'idle' ? '' : String(run.attempt.courseId)));
+   164	  const [rosterPage, setRosterPage] = useState(1);
+   165	  const roster = useQuery(
+   166	    (signal) => (courseId ? api.getRoster(courseId, rosterPage, signal) : Promise.resolve(null)),
+   167	    [api, courseId, rosterPage, settled],
+   168	  );
+   169	
+   170	  // A past operation opened from the history. Loading it through useQuery cancels the request of
+   171	  // an earlier choice, so a slow answer can never replace the operation that was selected last.
+   172	  const [viewedId, setViewedId] = useState(null);
+   173	  const viewed = useQuery(
+   174	    (signal) => (viewedId === null ? Promise.resolve(null) : api.getOperation(viewedId, signal)),
+   175	    [api, viewedId],
+   176	  );
+   177	
+   178	  const selectedCourse = courses.data?.find((course) => String(course.id) === courseId) ?? null;
+   179	  const rosterData = roster.status !== 'error' && roster.data?.course.id === selectedCourse?.id ? roster.data : null;
+   180	  const eligible = rosterData?.summary.eligible ?? 0;
+   181	  const submitting = run.status === 'submitting';
+   182	  // Why the run failed decides what may be said about it; only a 4xx is a definite "rejected".
+   183	  const failure = run.status === 'failed' ? writeOutcome(run.error) : null;
+   184	  const awaitingRetryDecision = failure === 'not_run' || failure === 'unknown';
+   185	
+   186	  const runResultId = run.status === 'succeeded' ? run.operation.id : null;
+   187	  // The result of the run is on screen already: never a second panel for the same operation.
+   188	  const showViewed = viewedId !== null && viewedId !== runResultId;
+   189	  const viewedOperation = viewed.status === 'success' && viewed.data?.id === viewedId ? viewed.data : null;
+   190	
+   191	  function submit(attempt) {
+   192	    setViewedId(null);
+   193	    // The store refuses a second request while one is in flight (double click, Enter + click).
+   194	    bulkIssues.submit(api, attempt);
+   195	  }
+   196	
+   197	  function startIssue() {
+   198	    if (!selectedCourse) return;
+   199	    submit({ courseId: selectedCourse.id, courseTitle: selectedCourse.title, key: newIdempotencyKey() });
+   200	  }
+   201	
+   202	  function changeCourse(nextId) {
+   203	    // Choosing the course that is already selected is not a new choice and must not discard the
+   204	    // status on screen. (A browser sends no change event for it; a script driving the page can.)
+   205	    if (nextId === courseId) return;
+   206	    setCourseId(nextId);
+   207	    setRosterPage(1);
+   208	    setViewedId(null);
+   209	    bulkIssues.dismiss(actor.email); // a request in flight stays; the select is locked then anyway
+   210	  }
+   211	
+   212	  function dismissRun() {
+   213	    if (viewedId === runResultId) setViewedId(null); // or the hidden copy would pop up in its place
+   214	    bulkIssues.dismiss(actor.email);
+   215	  }
+   216	
+   217	  function viewOperation(id) {
+   218	    if (id === runResultId) {
+   219	      // Its outcomes are on screen as the result of the run: point there instead of opening a copy.
+   220	      // Moving the focus is what makes the click perceivable when the panel is in view already:
+   221	      // a screen reader announces the heading, and styles.css outlines it.
+   222	      setViewedId(null);
+   223	      const heading = document.getElementById('result-heading');
+   224	      heading?.scrollIntoView?.({ block: 'nearest' });
+   225	      heading?.focus();
+   226	    } else if (id === viewedId) {
+   227	      viewed.reload();
+   228	    } else {
+   229	      setViewedId(id);
+   230	    }
+   231	  }
+   232	
+   233	  return (
+   234	    <>
+   235	      <section className="panel" aria-labelledby="bulk-heading">
+   236	        <div className="panel-header">
+   237	          <div>
+   238	            <h1 id="bulk-heading">Bulk issue certificates</h1>
+   239	            <p className="muted">
+   240	              Tenant <strong>{actor.tenant.name}</strong> · issues a certificate to every learner who has completed the
+   241	              course and is not certified yet
+   242	            </p>
+   243	          </div>
+   244	        </div>
+   245	
+   246	        {courses.status === 'error' ? (
+   247	          <ErrorState title="Courses could not be loaded" error={courses.error} onRetry={courses.reload} />
+   248	        ) : (
+   249	          <div className="toolbar">
+   250	            <label className="field field-grow">
+   251	              <span className="field-label">Course</span>
+   252	              <select
+   253	                value={courseId}
+   254	                disabled={courses.status === 'loading' || submitting}
+   255	                onChange={(event) => changeCourse(event.target.value)}
+   256	                data-testid="course-select"
+   257	              >
+   258	                <option value="">{courses.status === 'loading' ? 'Loading courses…' : 'Choose a course…'}</option>
+   259	                {(courses.data ?? []).map((course) => (
+   260	                  <option key={course.id} value={course.id}>
+   261	                    {course.title}
+   262	                  </option>
+   263	                ))}
+   264	              </select>
+   265	            </label>
+   266	            <div className="field">
+   267	              <span className="field-label">&nbsp;</span>
+   268	              <button
+   269	                type="button"
+   270	                className="btn btn-primary"
+   271	                onClick={startIssue}
+   272	                disabled={!rosterData || eligible === 0 || submitting || awaitingRetryDecision || roster.status === 'loading'}
+   273	                data-testid="issue-button"
+   274	              >
+   275	                {submitting ? (
+   276	                  <Spinner label="Issuing…" />
+   277	                ) : rosterData && eligible === 0 ? (
+   278	                  'No eligible learners'
+   279	                ) : rosterData ? (
+   280	                  `Issue ${eligible.toLocaleString('en-US')} certificate${eligible === 1 ? '' : 's'}`
+   281	                ) : (
+   282	                  'Issue certificates'
+   283	                )}
+   284	              </button>
+   285	            </div>
+   286	          </div>
+   287	        )}
+   288	
+   289	        {/* Operation status ------------------------------------------------------------------ */}
+   290	        <div aria-live="polite" data-testid="operation-status" data-state={run.status}>
+   291	          {run.status === 'submitting' ? (
+   292	            <p className="note">
+   293	              <Spinner label={`Issuing certificates for ${run.attempt.courseTitle}…`} /> Please wait; the button is locked
+   294	              until the server has answered.
+   295	            </p>
+   296	          ) : null}
+   297	          {run.status === 'failed' ? (
+   298	            <div className="state state-error" role="alert">
+   299	              <div className="state-icon" aria-hidden="true">
+   300	                !
+   301	              </div>
+   302	              <div className="state-body">
+   303	                <strong>
+   304	                  {failure === 'not_run'
+   305	                    ? `The bulk issue for ${run.attempt.courseTitle} has not run yet`
+   306	                    : failure === 'unknown'
+   307	                      ? `The bulk issue for ${run.attempt.courseTitle} may or may not have gone through`
+   308	                      : `The bulk issue for ${run.attempt.courseTitle} was rejected`}
+   309	                </strong>
+   310	                <p>{run.error?.message || 'Unexpected error'}</p>
+   311	                {awaitingRetryDecision ? (
+   312	                  <p className="muted small">
+   313	                    Retrying is safe: the request is repeated with the same idempotency key, so learners are never
+   314	                    certified twice.
+   315	                  </p>
+   316	                ) : null}
+   317	              </div>
+   318	              <div className="state-actions">
+   319	                {awaitingRetryDecision ? (
+   320	                  <button type="button" className="btn btn-primary" onClick={() => submit(run.attempt)} data-testid="retry-button">
+   321	                    Retry safely
+   322	                  </button>
+   323	                ) : null}
+   324	                <button type="button" className="btn" onClick={dismissRun}>
+   325	                  Dismiss
+   326	                </button>
+   327	              </div>
+   328	            </div>
+   329	          ) : null}
+   330	        </div>
+   331	
+   332	        {/* Roster: what the next bulk issue will do ---------------------------------------------- */}
+   333	        {!courseId ? (
+   334	          courses.status === 'success' && courses.data.length === 0 ? (
+   335	            <EmptyState title="This tenant has no courses yet" />
+   336	          ) : (
+   337	            <EmptyState title="Choose a course to review its learners">
+   338	              You will see who is eligible before anything is issued.
+   339	            </EmptyState>
+   340	          )
+   341	        ) : roster.status === 'error' ? (
+   342	          <ErrorState title="The course roster could not be loaded" error={roster.error} onRetry={roster.reload} />
+   343	        ) : !rosterData ? (
+   344	          <div className="state state-loading">
+   345	            <Spinner label="Loading learners…" />
+   346	          </div>
+   347	        ) : (
+   348	          <>
+   349	            <div className="tiles" data-testid="roster-summary">
+   350	              <div className="tile">
+   351	                <span className="tile-value">{rosterData.summary.enrolled.toLocaleString('en-US')}</span>
+   352	                <span className="tile-label">Enrolled</span>
+   353	              </div>
+   354	              <div className="tile">
+   355	                <span className="tile-value">{rosterData.summary.completed.toLocaleString('en-US')}</span>
+   356	                <span className="tile-label">Completed</span>
+   357	              </div>
+   358	              <div className="tile">
+   359	                <span className="tile-value">{rosterData.summary.certified.toLocaleString('en-US')}</span>
+   360	                <span className="tile-label">Certified</span>
+   361	              </div>
+   362	              <div className="tile tile-issued">
+   363	                <span className="tile-value" data-testid="eligible-count">
+   364	                  {eligible.toLocaleString('en-US')}
+   365	                </span>
+   366	                <span className="tile-label">Eligible now</span>
+   367	              </div>
+   368	            </div>
+   369	
+   370	            {rosterData.items.length === 0 ? (
+   371	              <EmptyState title="Nobody is enrolled in this course" />
+   372	            ) : (
+   373	              <div className="table-wrap" aria-busy={roster.status === 'loading'}>
+   374	                <table className={roster.status === 'loading' ? 'data-table is-refreshing' : 'data-table'}>
+   375	                  <thead>
+   376	                    <tr>
+   377	                      <th scope="col">Learner</th>
+   378	                      <th scope="col">Enrollment</th>
+   379	                      <th scope="col">Certificate</th>
+   380	                      <th scope="col">Next bulk issue</th>
+   381	                    </tr>
+   382	                  </thead>
+   383	                  <tbody>
+   384	                    {rosterData.items.map((item) => (
+   385	                      <tr key={item.enrollmentId}>
+   386	                        <td className="nowrap">{item.learnerName}</td>
+   387	                        <td className="nowrap">
+   388	                          {ENROLLMENT_LABELS[item.enrollmentStatus] ?? item.enrollmentStatus}
+   389	                          {item.completedLocal ? <span className="muted small"> · {item.completedLocal}</span> : null}
+   390	                        </td>
+   391	                        <td className="nowrap">
+   392	                          {item.certificateId ? (
+   393	                            <>
+   394	                              <a className="mono" href={`#/certificates/${item.certificateId}`}>
+   395	                                {item.serialNumber}
+   396	                              </a>{' '}
+   397	                              <StatusBadge status={item.certificateStatus} />
+   398	                            </>
+   399	                          ) : (
+   400	                            <span className="muted">None</span>
+   401	                          )}
+   402	                        </td>
+   403	                        <td>
+   404	                          {item.eligible ? (
+   405	                            <span className="badge badge-issued">Will be issued</span>
+   406	                          ) : (
+   407	                            <span className="muted">Skipped: {item.message}</span>
+   408	                          )}
+   409	                        </td>
+   410	                      </tr>
+   411	                    ))}
+   412	                  </tbody>
+   413	                </table>
+   414	              </div>
+   415	            )}
+   416	            {rosterData.totalPages > 1 ? (
+   417	              <Pagination
+   418	                page={rosterData.page}
+   419	                totalPages={rosterData.totalPages}
+   420	                total={rosterData.total}
+   421	                pageSize={rosterData.pageSize}
+   422	                itemCount={rosterData.items.length}
+   423	                disabled={roster.status === 'loading'}
+   424	                onPageChange={setRosterPage}
+   425	                noun="learners"
+   426	              />
+   427	            ) : null}
+   428	          </>
+   429	        )}
+   430	      </section>
+   431	
+   432	      {run.status === 'succeeded' ? (
+   433	        <OperationResult
+   434	          key={`run-${run.operation.id}-${run.attempt.key}`}
+   435	          operation={run.operation}
+   436	          replayed={run.replayed}
+   437	          onDismiss={dismissRun}
+   438	        />
+   439	      ) : null}
+   440	
+   441	      {!showViewed ? null : viewed.status === 'error' ? (
+   442	        <section className="panel">
+   443	          <ErrorState title={`Operation #${viewedId} could not be loaded`} error={viewed.error} onRetry={viewed.reload} />
+   444	        </section>
+   445	      ) : !viewedOperation ? (
+   446	        <section className="panel">
+   447	          <Spinner label={`Loading operation #${viewedId}…`} />
+   448	        </section>
+   449	      ) : (
+   450	        <OperationResult
+   451	          key={`viewed-${viewedId}`}
+   452	          // Shown below the result of a run, it must not repeat that panel's heading id.
+   453	          headingId={run.status === 'succeeded' ? 'viewed-result-heading' : 'result-heading'}
+   454	          operation={viewedOperation}
+   455	          replayed={false}
+   456	          onDismiss={() => setViewedId(null)}
+   457	        />
+   458	      )}
+   459	
+   460	      <section className="panel" aria-labelledby="history-heading">
+   461	        <div className="panel-header">
+   462	          <h2 id="history-heading">Recent operations</h2>
+   463	        </div>
+   464	        {operations.status === 'error' ? (
+   465	          <ErrorState title="Operations could not be loaded" error={operations.error} onRetry={operations.reload} />
+   466	        ) : !operations.data ? (
+   467	          <div className="state state-loading">
+   468	            <Spinner label="Loading operations…" />
+   469	          </div>
+   470	        ) : operations.data.length === 0 ? (
+   471	          <EmptyState title="No bulk issues have been run in this tenant yet" />
+   472	        ) : (
+   473	          <div className="table-wrap">
+   474	            <table className="data-table" data-testid="operation-history">
+   475	              <thead>
+   476	                <tr>
+   477	                  <th scope="col">Operation</th>
+   478	                  <th scope="col">Course</th>
+   479	                  <th scope="col">Started ({actor.tenant.timezone})</th>
+   480	                  <th scope="col">Requested by</th>
+   481	                  <th scope="col">Issued</th>
+   482	                  <th scope="col">Skipped</th>
+   483	                  <th scope="col">Failed</th>
+   484	                  <th scope="col">
+   485	                    <span className="sr-only">Actions</span>
+   486	                  </th>
+   487	                </tr>
+   488	              </thead>
+   489	              <tbody>
+   490	                {operations.data.map((operation) => (
+   491	                  <tr key={operation.id}>
+   492	                    <td>#{operation.id}</td>
+   493	                    <td>{operation.course.title}</td>
+   494	                    <td className="nowrap">{operation.createdLocal}</td>
+   495	                    <td>{operation.requestedBy}</td>
+   496	                    <td>{operation.summary.issued}</td>
+   497	                    <td>{operation.summary.skipped}</td>
+   498	                    <td>{operation.summary.failed}</td>
+   499	                    <td>
+   500	                      <button type="button" className="link" onClick={() => viewOperation(operation.id)}>
+   501	                        View outcomes
+   502	                      </button>
+   503	                    </td>
+   504	                  </tr>
+   505	                ))}
+   506	              </tbody>
+   507	            </table>
+   508	          </div>
+   509	        )}
+   510	      </section>
+   511	    </>
+   512	  );
+   513	}
+=================== bulkIssueStore.js
+     1	import { useSyncExternalStore } from 'react';
+     2	
+     3	import { ApiError, writeOutcome } from './api.js';
+     4	
+     5	/**
+     6	 * Bulk-issue attempts, kept above the routed pages.
+     7	 *
+     8	 * The Bulk issue page is unmounted whenever the admin opens another tab or follows a serial link.
+     9	 * If the attempt lived in that page, coming back while the request is still on its way would show
+    10	 * an idle form and offer a fresh submission under a new idempotency key - a second operation for
+    11	 * one intention. So the attempt (course + key), its status and the in-flight lock live here
+    12	 * instead, one entry per actor e-mail:
+    13	 *
+    14	 * - a page that mounts again re-attaches to the attempt of its actor (lock, status, key);
+    15	 * - a request that finishes while nobody is looking still records its result or its failure;
+    16	 * - an actor only ever reads its own entry, so one tenant's operation is never shown while acting
+    17	 *   as another tenant, and it is still there when the admin switches back.
+    18	 *
+    19	 * App creates one store for its lifetime. A full page load (reload, or leaving the site and coming
+    20	 * back) ends that lifetime while a request may still be on its way, so every attempt whose outcome
+    21	 * is not known yet is also written to the tab's sessionStorage and picked up again by the next
+    22	 * store - see `restore` below.
+    23	 */
+    24	
+    25	const IDLE = Object.freeze({ status: 'idle' });
+    26	const NOTHING_YET = Object.freeze({ run: IDLE, settled: 0 });
+    27	
+    28	const STORAGE_KEY = 'cert-admin.bulk-issue.unsettled';
+    29	
+    30	/** The storage of this browser tab, or null where the browser refuses access to it. */
+    31	function tabStorage() {
+    32	  try {
+    33	    return window.sessionStorage;
+    34	  } catch {
+    35	    return null;
+    36	  }
+    37	}
+    38	
+    39	const isAttempt = (attempt) =>
+    40	  typeof attempt === 'object' &&
+    41	  attempt !== null &&
+    42	  (Number.isInteger(attempt.courseId) || typeof attempt.courseId === 'string') &&
+    43	  typeof attempt.courseTitle === 'string' &&
+    44	  typeof attempt.key === 'string' &&
+    45	  attempt.key !== '';
+    46	
+    47	/**
+    48	 * The attempts a previous page left without a known outcome, as store entries.
+    49	 *
+    50	 * Each one comes back as a failed run with an unknown (or "has not run yet") outcome, i.e. as the
+    51	 * prompt to retry safely: the page that sent the request is gone and nobody will ever see its
+    52	 * answer, but the key is still known, and repeating the request with that key is how to find out
+    53	 * what happened without issuing twice.
+    54	 */
+    55	function restore(storage) {
+    56	  const entries = new Map();
+    57	  let saved;
+    58	  try {
+    59	    saved = JSON.parse(storage?.getItem(STORAGE_KEY) ?? 'null');
+    60	  } catch {
+    61	    return entries; // unreadable or not ours: start empty rather than fail to start at all
+    62	  }
+    63	  if (typeof saved !== 'object' || saved === null) return entries;
+    64	  for (const [email, record] of Object.entries(saved)) {
+    65	    if (!isAttempt(record?.attempt)) continue;
+    66	    const { courseId, courseTitle, key } = record.attempt;
+    67	    const failure = record.failure;
+    68	    const error =
+    69	      typeof failure === 'object' && failure !== null
+    70	        ? new ApiError(Number(failure.status) || 0, String(failure.code), String(failure.message))
+    71	        : new ApiError(0, 'interrupted', 'The page was reloaded or left before the answer from the server arrived.');
+    72	    entries.set(email, { run: { status: 'failed', attempt: { courseId, courseTitle, key }, error }, settled: 0 });
+    73	  }
+    74	  return entries;
+    75	}
+    76	
+    77	export function createBulkIssueStore(storage = tabStorage()) {
+    78	  // actor e-mail -> { run, settled }
+    79	  //   run:     { status: 'idle' }
+    80	  //          | { status: 'submitting', attempt }
+    81	  //          | { status: 'succeeded', attempt, operation, replayed }
+    82	  //          | { status: 'failed', attempt, error }      with attempt = { courseId, courseTitle, key }
+    83	  //   settled: number of requests of this actor that have finished; pages refetch what a bulk
+    84	  //            issue changes (roster, history) whenever it moves.
+    85	  const entries = restore(storage);
+    86	  const listeners = new Set();
+    87	
+    88	  const read = (email) => entries.get(email) ?? NOTHING_YET;
+    89	
+    90	  function write(email, entry) {
+    91	    entries.set(email, entry);
+    92	    save();
+    93	    for (const listener of listeners) listener();
+    94	  }
+    95	
+    96	  /**
+    97	   * Mirrors into the tab's storage what must outlive this page: the attempts that are on their way
+    98	   * or wait for a retry, with their keys. A result, a rejection (4xx: nothing was written and the
+    99	   * next attempt is a new operation) and a dismissed run are settled and are not kept.
+   100	   */
+   101	  function save() {
+   102	    const unsettled = {};
+   103	    for (const [email, { run }] of entries) {
+   104	      if (run.status === 'submitting') {
+   105	        unsettled[email] = { attempt: run.attempt };
+   106	      } else if (run.status === 'failed' && writeOutcome(run.error) !== 'rejected') {
+   107	        const { status = 0, code = 'unexpected_error', message = '' } = run.error ?? {};
+   108	        unsettled[email] = { attempt: run.attempt, failure: { status, code, message: message || 'Unexpected error' } };
+   109	      }
+   110	    }
+   111	    try {
+   112	      if (Object.keys(unsettled).length > 0) storage?.setItem(STORAGE_KEY, JSON.stringify(unsettled));
+   113	      else storage?.removeItem(STORAGE_KEY);
+   114	    } catch {
+   115	      // storage full or blocked: the attempt then lives as long as this page, as it did before
+   116	    }
+   117	  }
+   118	
+   119	  return {
+   120	    read,
+   121	
+   122	    subscribe(listener) {
+   123	      listeners.add(listener);
+   124	      return () => listeners.delete(listener);
+   125	    },
+   126	
+   127	    /**
+   128	     * Sends `attempt` on behalf of the actor of `api`, unless that actor already has a request on
+   129	     * its way. Checking and locking happen synchronously, before anything is rendered: a double
+   130	     * click (or Enter + click) cannot start two requests, on whichever page instance it lands.
+   131	     * Should a duplicate reach the server after all (e.g. a retry after a timeout), the
+   132	     * idempotency key makes it harmless. Passing the attempt of a failed run again is the safe
+   133	     * retry: same course, same key.
+   134	     */
+   135	    async submit(api, attempt) {
+   136	      const email = api.actor;
+   137	      const { run, settled } = read(email);
+   138	      if (run.status === 'submitting') return;
+   139	      write(email, { run: { status: 'submitting', attempt }, settled });
+   140	
+   141	      let next;
+   142	      try {
+   143	        const { operation, replayed } = await api.bulkIssue(attempt.courseId, attempt.key);
+   144	        next = { status: 'succeeded', attempt, operation, replayed };
+   145	      } catch (error) {
+   146	        next = { status: 'failed', attempt, error };
+   147	      }
+   148	      // Nothing else can have touched the entry meanwhile: submit and dismiss both back off while
+   149	      // a request is in flight.
+   150	      write(email, { run: next, settled: settled + 1 });
+   151	    },
+   152	
+   153	    /** Forgets a finished run (result or failure). A request in flight cannot be dismissed. */
+   154	    dismiss(email) {
+   155	      const { run, settled } = read(email);
+   156	      if (run.status === 'submitting' || run.status === 'idle') return;
+   157	      write(email, { run: IDLE, settled });
+   158	    },
+   159	  };
+   160	}
+   161	
+   162	/** The bulk-issue state of one actor: `{ run, settled }`, re-rendering the caller when it changes. */
+   163	export function useBulkIssue(store, email) {
+   164	  return useSyncExternalStore(store.subscribe, () => store.read(email));
+   165	}
+=================== components/ui.jsx
+     1	import { useEffect, useRef } from 'react';
+     2	
+     3	export function Spinner({ label }) {
+     4	  return (
+     5	    <span className="spinner-wrap" role="status">
+     6	      <span className="spinner" aria-hidden="true" />
+     7	      {label ? <span>{label}</span> : <span className="sr-only">Loading</span>}
+     8	    </span>
+     9	  );
+    10	}
+    11	
+    12	const STATUS_LABELS = { active: 'Active', revoked: 'Revoked' };
+    13	
+    14	export function StatusBadge({ status }) {
+    15	  return <span className={`badge badge-${status}`}>{STATUS_LABELS[status] ?? status}</span>;
+    16	}
+    17	
+    18	const OUTCOME_LABELS = { issued: 'Issued', skipped: 'Skipped', failed: 'Failed' };
+    19	
+    20	export function OutcomeBadge({ outcome }) {
+    21	  return <span className={`badge badge-${outcome}`}>{OUTCOME_LABELS[outcome] ?? outcome}</span>;
+    22	}
+    23	
+    24	/** Error panel with the server's message and, when it makes sense, a way to try again. */
+    25	export function ErrorState({ title = 'Something went wrong', error, onRetry, retryLabel = 'Try again' }) {
+    26	  return (
+    27	    <div className="state state-error" role="alert">
+    28	      <div className="state-icon" aria-hidden="true">
+    29	        !
+    30	      </div>
+    31	      <div className="state-body">
+    32	        <strong>{title}</strong>
+    33	        <p>{error?.message ?? 'Unexpected error'}</p>
+    34	        {error?.status ? <p className="muted small">HTTP {error.status}{error.code ? ` · ${error.code}` : ''}</p> : null}
+    35	      </div>
+    36	      {onRetry ? (
+    37	        <button type="button" className="btn" onClick={onRetry}>
+    38	          {retryLabel}
+    39	        </button>
+    40	      ) : null}
+    41	    </div>
+    42	  );
+    43	}
+    44	
+    45	export function EmptyState({ title, children, action }) {
+    46	  return (
+    47	    <div className="state state-empty">
+    48	      <div className="state-body">
+    49	        <strong>{title}</strong>
+    50	        {children ? <p>{children}</p> : null}
+    51	      </div>
+    52	      {action}
+    53	    </div>
+    54	  );
+    55	}
+    56	
+    57	export function Pagination({ page, totalPages, total, pageSize, itemCount, disabled, onPageChange, noun = 'certificates' }) {
+    58	  const first = total === 0 ? 0 : (page - 1) * pageSize + 1;
+    59	  const last = total === 0 ? 0 : first + itemCount - 1;
+    60	  const format = (n) => n.toLocaleString('en-US');
+    61	  return (
+    62	    <nav className="pagination" aria-label="Pagination">
+    63	      <span className="muted" aria-live="polite">
+    64	        {total === 0 ? `No ${noun}` : `${format(first)}–${format(last)} of ${format(total)} ${noun}`}
+    65	      </span>
+    66	      <div className="pagination-buttons">
+    67	        <button type="button" className="btn btn-small" disabled={disabled || page <= 1} onClick={() => onPageChange(1)}>
+    68	          « First
+    69	        </button>
+    70	        <button type="button" className="btn btn-small" disabled={disabled || page <= 1} onClick={() => onPageChange(page - 1)}>
+    71	          ‹ Previous
+    72	        </button>
+    73	        <span className="pagination-page">
+    74	          Page {format(page)} of {format(totalPages)}
+    75	        </span>
+    76	        <button
+    77	          type="button"
+    78	          className="btn btn-small"
+    79	          disabled={disabled || page >= totalPages}
+    80	          onClick={() => onPageChange(page + 1)}
+    81	        >
+    82	          Next ›
+    83	        </button>
+    84	        <button
+    85	          type="button"
+    86	          className="btn btn-small"
+    87	          disabled={disabled || page >= totalPages}
+    88	          onClick={() => onPageChange(totalPages)}
+    89	        >
+    90	          Last »
+    91	        </button>
+    92	      </div>
+    93	    </nav>
+    94	  );
+    95	}
+    96	
+    97	/**
+    98	 * Modal layer used for the certificate drawer and the revoke confirmation.
+    99	 * Escape and a click on the backdrop close it (unless `locked`, e.g. while a request is running);
+   100	 * focus moves into the dialog on open and returns to the previously focused element on close.
+   101	 */
+   102	export function Dialog({ title, onClose, locked = false, variant = 'modal', children, labelledBy, describedBy }) {
+   103	  const panelRef = useRef(null);
+   104	  const onCloseRef = useRef(onClose);
+   105	  onCloseRef.current = onClose;
+   106	  const lockedRef = useRef(locked);
+   107	  lockedRef.current = locked;
+   108	
+   109	  useEffect(() => {
+   110	    const panel = panelRef.current;
+   111	    const previouslyFocused = document.activeElement;
+   112	    panel?.focus();
+   113	    const onKeyDown = (event) => {
+   114	      if (event.key !== 'Escape' || lockedRef.current) return;
+   115	      // Only the top-most dialog reacts, so Escape closes the confirmation before the drawer.
+   116	      const dialogs = document.querySelectorAll('[role="dialog"]');
+   117	      if (dialogs[dialogs.length - 1] === panelRef.current) {
+   118	        event.stopPropagation();
+   119	        onCloseRef.current();
+   120	      }
+   121	    };
+   122	    document.addEventListener('keydown', onKeyDown);
+   123	    return () => {
+   124	      document.removeEventListener('keydown', onKeyDown);
+   125	      if (previouslyFocused instanceof HTMLElement && document.contains(previouslyFocused)) {
+   126	        previouslyFocused.focus();
+   127	        return;
+   128	      }
+   129	      // The element that opened this dialog no longer exists (the Revoke button of a certificate
+   130	      // that is revoked now). The focus would then drop to <body>, behind a dialog that is still
+   131	      // open, and the next Tab would leave it: hand the focus to the top-most remaining dialog.
+   132	      const remaining = [...document.querySelectorAll('[role="dialog"]')].filter((dialog) => dialog !== panel);
+   133	      remaining[remaining.length - 1]?.focus();
+   134	    };
+   135	  }, []);
+   136	
+   137	  return (
+   138	    <div
+   139	      className={`overlay overlay-${variant}`}
+   140	      onMouseDown={(event) => {
+   141	        if (event.target === event.currentTarget && !locked) onClose();
+   142	      }}
+   143	    >
+   144	      <div
+   145	        ref={panelRef}
+   146	        className={`dialog dialog-${variant}`}
+   147	        role="dialog"
+   148	        aria-modal="true"
+   149	        aria-label={labelledBy ? undefined : title}
+   150	        aria-labelledby={labelledBy}
+   151	        aria-describedby={describedBy}
+   152	        tabIndex={-1}
+   153	      >
+   154	        {children}
+   155	      </div>
+   156	    </div>
+   157	  );
+   158	}

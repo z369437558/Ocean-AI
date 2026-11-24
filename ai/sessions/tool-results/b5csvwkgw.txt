@@ -1,0 +1,696 @@
+     1	import { useEffect, useMemo, useState } from 'react';
+     2	
+     3	import { createApi, fetchActors } from './api.js';
+     4	import { createBulkIssueStore } from './bulkIssueStore.js';
+     5	import BulkIssuePage from './components/BulkIssuePage.jsx';
+     6	import CertificatesPage from './components/CertificatesPage.jsx';
+     7	import ErrorBoundary from './components/ErrorBoundary.jsx';
+     8	import { ErrorState, Spinner } from './components/ui.jsx';
+     9	import { navigate, useHashRoute, useQuery } from './hooks.js';
+    10	
+    11	const ACTOR_STORAGE_KEY = 'cert-admin.actor';
+    12	
+    13	function readStoredActor() {
+    14	  try {
+    15	    return window.localStorage.getItem(ACTOR_STORAGE_KEY);
+    16	  } catch {
+    17	    return null;
+    18	  }
+    19	}
+    20	
+    21	function storeActor(email) {
+    22	  try {
+    23	    window.localStorage.setItem(ACTOR_STORAGE_KEY, email);
+    24	  } catch {
+    25	    // storage unavailable (private mode): the choice simply does not survive a reload
+    26	  }
+    27	}
+    28	
+    29	function Console() {
+    30	  const actors = useQuery((signal) => fetchActors(signal), []);
+    31	  const [selectedEmail, setSelectedEmail] = useState(readStoredActor);
+    32	  const route = useHashRoute();
+    33	  // Bulk-issue attempts outlive the Bulk issue page: leaving the tab while a request is pending
+    34	  // must not drop its lock, its status or its idempotency key. The store also brings back, from
+    35	  // the tab's sessionStorage, attempts that a reload interrupted (see bulkIssueStore.js).
+    36	  const [bulkIssues] = useState(() => createBulkIssueStore());
+    37	
+    38	  const actor = useMemo(() => {
+    39	    if (!actors.data?.length) return null;
+    40	    return actors.data.find((candidate) => candidate.email === selectedEmail) ?? actors.data[0];
+    41	  }, [actors.data, selectedEmail]);
+    42	
+    43	  const api = useMemo(() => (actor ? createApi(actor.email) : null), [actor]);
+    44	
+    45	  useEffect(() => {
+    46	    document.title = actor ? `Certificates · ${actor.tenant.name}` : 'Certificate Admin Console';
+    47	  }, [actor]);
+    48	
+    49	  function switchActor(email) {
+    50	    if (email === actor?.email) return;
+    51	    storeActor(email);
+    52	    setSelectedEmail(email);
+    53	    // Ids are tenant-specific: never carry an open certificate over to another tenant.
+    54	    navigate(route.view === 'bulk-issue' ? '/bulk-issue' : '/certificates');
+    55	  }
+    56	
+    57	  if (!actor) {
+    58	    return (
+    59	      <div className="boot">
+    60	        {actors.status === 'error' ? (
+    61	          <ErrorState title="The console could not start" error={actors.error} onRetry={actors.reload} />
+    62	        ) : actors.status === 'success' ? (
+    63	          <ErrorState title="No admin accounts found" error={{ message: 'The database has no seeded admins. Run "npm run db:reset".' }} />
+    64	        ) : (
+    65	          <Spinner label="Loading console…" />
+    66	        )}
+    67	      </div>
+    68	    );
+    69	  }
+    70	
+    71	  return (
+    72	    <div className="app">
+    73	      <header className="topbar">
+    74	        <div className="topbar-brand">
+    75	          <span className="brand-mark" aria-hidden="true">
+    76	            ✓
+    77	          </span>
+    78	          <span className="brand-name">Certificate Admin</span>
+    79	        </div>
+    80	
+    81	        <nav className="tabs" aria-label="Sections">
+    82	          <a href="#/certificates" className={route.view === 'certificates' ? 'tab tab-active' : 'tab'} aria-current={route.view === 'certificates' ? 'page' : undefined}>
+    83	            Certificates
+    84	          </a>
+    85	          <a href="#/bulk-issue" className={route.view === 'bulk-issue' ? 'tab tab-active' : 'tab'} aria-current={route.view === 'bulk-issue' ? 'page' : undefined}>
+    86	            Bulk issue
+    87	          </a>
+    88	        </nav>
+    89	
+    90	        <div className="topbar-actor">
+    91	          <div className="tenant-chip" title="All data and actions are limited to this tenant">
+    92	            <span className="tenant-name" data-testid="tenant-name">
+    93	              {actor.tenant.name}
+    94	            </span>
+    95	            <span className="tenant-zone">{actor.tenant.timezone}</span>
+    96	          </div>
+    97	          <label className="actor-select">
+    98	            <span>Acting as</span>
+    99	            <select value={actor.email} onChange={(event) => switchActor(event.target.value)} data-testid="actor-select">
+   100	              {actors.data.map((candidate) => (
+   101	                <option key={candidate.email} value={candidate.email}>
+   102	                  {candidate.email} ({candidate.tenant.name})
+   103	                </option>
+   104	              ))}
+   105	            </select>
+   106	          </label>
+   107	        </div>
+   108	      </header>
+   109	
+   110	      {/* Keyed by actor: switching tenants discards every piece of page state (search, selection,
+   111	          viewed results) and cancels an export in flight. Only bulk-issue attempts are kept, per
+   112	          actor, in the store above; the page of another actor never reads them. */}
+   113	      <main className="content" key={actor.email}>
+   114	        {route.view === 'bulk-issue' ? (
+   115	          <BulkIssuePage api={api} actor={actor} bulkIssues={bulkIssues} />
+   116	        ) : (
+   117	          <CertificatesPage api={api} actor={actor} selectedCertificateId={route.certificateId} />
+   118	        )}
+   119	      </main>
+   120	    </div>
+   121	  );
+   122	}
+   123	
+   124	export default function App() {
+   125	  return (
+   126	    <ErrorBoundary>
+   127	      <Console />
+   128	    </ErrorBoundary>
+   129	  );
+   130	}
+   131	import { useEffect, useRef, useState } from 'react';
+   132	
+   133	import { navigate, useDebouncedValue, useQuery } from '../hooks.js';
+   134	import CertificateDetail from './CertificateDetail.jsx';
+   135	import { EmptyState, ErrorState, Pagination, Spinner, StatusBadge } from './ui.jsx';
+   136	
+   137	const COLUMNS = [
+   138	  { field: 'serial', label: 'Serial number', defaultOrder: 'asc' },
+   139	  { field: 'learner', label: 'Learner', defaultOrder: 'asc' },
+   140	  { field: 'course', label: 'Course', defaultOrder: 'asc' },
+   141	  { field: 'issued', label: 'Issued', defaultOrder: 'desc' },
+   142	  { field: 'status', label: 'Status', defaultOrder: 'asc' },
+   143	];
+   144	
+   145	const SORT_OPTIONS = [
+   146	  { value: 'issued:desc', label: 'Issue date – newest first' },
+   147	  { value: 'issued:asc', label: 'Issue date – oldest first' },
+   148	  { value: 'learner:asc', label: 'Learner – A to Z' },
+   149	  { value: 'learner:desc', label: 'Learner – Z to A' },
+   150	  { value: 'course:asc', label: 'Course – A to Z' },
+   151	  { value: 'course:desc', label: 'Course – Z to A' },
+   152	  { value: 'serial:asc', label: 'Serial number – ascending' },
+   153	  { value: 'serial:desc', label: 'Serial number – descending' },
+   154	  { value: 'status:asc', label: 'Status – active first' },
+   155	  { value: 'status:desc', label: 'Status – revoked first' },
+   156	];
+   157	
+   158	const PAGE_SIZES = [10, 25, 50, 100];
+   159	
+   160	/**
+   161	 * The search text as it is sent to the server. Pasted text easily carries tabs or line breaks
+   162	 * (two spreadsheet cells, a line of an e-mail) and the server rejects control characters with a
+   163	 * 400, so every run of them - together with the spaces around it - becomes a single space.
+   164	 */
+   165	function toSearchQuery(text) {
+   166	  return text.replace(/ *[\u0000-\u001f\u007f][\u0000-\u001f\u007f ]*/g, ' ').trim();
+   167	}
+   168	
+   169	function formatBytes(bytes) {
+   170	  if (bytes < 1024) return `${bytes} B`;
+   171	  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+   172	  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+   173	}
+   174	
+   175	export default function CertificatesPage({ api, actor, selectedCertificateId }) {
+   176	  const [searchText, setSearchText] = useState('');
+   177	  const [search, setSearch] = useDebouncedValue(toSearchQuery(searchText), 300);
+   178	  const [status, setStatus] = useState('all');
+   179	  const [sort, setSort] = useState({ field: 'issued', order: 'desc' });
+   180	  const [pageSize, setPageSize] = useState(25);
+   181	
+   182	  // The page number belongs to one particular search/sort. Whenever those change, the list starts
+   183	  // over at page 1 in the same render - no extra request for a page of the previous result set.
+   184	  const filterKey = JSON.stringify([search, status, sort.field, sort.order, pageSize]);
+   185	  const [pageState, setPageState] = useState({ key: filterKey, page: 1 });
+   186	  const page = pageState.key === filterKey ? pageState.page : 1;
+   187	  const setPage = (next) => setPageState({ key: filterKey, page: next });
+   188	
+   189	  const filters = { q: search, status, sort: sort.field, order: sort.order };
+   190	  const list = useQuery((signal) => api.listCertificates({ ...filters, page, pageSize }, signal), [api, filterKey, page]);
+   191	  const { data } = list;
+   192	
+   193	  // If rows disappeared underneath us (the last page no longer exists), step back to the last page.
+   194	  useEffect(() => {
+   195	    if (list.status === 'success' && data.items.length === 0 && data.total > 0 && page > data.totalPages) {
+   196	      setPageState({ key: filterKey, page: data.totalPages });
+   197	    }
+   198	  }, [list.status, data, page, filterKey]);
+   199	
+   200	  const [exportState, setExportState] = useState({ status: 'idle' });
+   201	  // The export belongs to this page. When the page goes away - another tab, another actor - a
+   202	  // download still in flight is cancelled; otherwise the file would be saved later with nothing on
+   203	  // screen to explain it, possibly a file of tenant A while the console is acting as tenant B.
+   204	  const exportAbort = useRef(null);
+   205	  useEffect(() => () => exportAbort.current?.abort(), []);
+   206	
+   207	  async function handleExport() {
+   208	    if (exportState.status === 'running') return; // one export at a time per window
+   209	    const q = toSearchQuery(searchText);
+   210	    setSearch(q); // apply pending keystrokes now, so the table and the file show the same rows
+   211	    setExportState({ status: 'running' });
+   212	    const controller = new AbortController();
+   213	    exportAbort.current = controller;
+   214	    try {
+   215	      const result = await api.exportCsv({ q, status, sort: sort.field, order: sort.order }, controller.signal);
+   216	      setExportState({ status: 'done', ...result });
+   217	    } catch (error) {
+   218	      if (controller.signal.aborted) return; // the page is gone: nothing to report, nobody to tell
+   219	      setExportState({ status: 'error', error });
+   220	    }
+   221	  }
+   222	
+   223	  function sortBy(column) {
+   224	    setSort((current) =>
+   225	      current.field === column.field
+   226	        ? { field: column.field, order: current.order === 'asc' ? 'desc' : 'asc' }
+   227	        : { field: column.field, order: column.defaultOrder },
+   228	    );
+   229	  }
+   230	
+   231	  function clearFilters() {
+   232	    setSearchText('');
+   233	    setSearch('');
+   234	    setStatus('all');
+   235	  }
+   236	
+   237	  const hasFilters = search !== '' || status !== 'all';
+   238	  const isFirstLoad = list.status === 'loading' && !data;
+   239	  const isRefreshing = list.status === 'loading' && Boolean(data);
+   240	
+   241	  return (
+   242	    <>
+   243	      <section className="panel" aria-labelledby="certificates-heading">
+   244	        <div className="panel-header">
+   245	          <div>
+   246	            <h1 id="certificates-heading">Certificates</h1>
+   247	            <p className="muted">
+   248	              Tenant <strong>{actor.tenant.name}</strong> · issue dates are shown in {actor.tenant.timezone} local time
+   249	            </p>
+   250	          </div>
+   251	          <div className="panel-actions">
+   252	            <button
+   253	              type="button"
+   254	              className="btn"
+   255	              onClick={handleExport}
+   256	              disabled={exportState.status === 'running'}
+   257	              data-testid="export-button"
+   258	            >
+   259	              {exportState.status === 'running' ? <Spinner label="Exporting…" /> : 'Export CSV'}
+   260	            </button>
+   261	          </div>
+   262	        </div>
+   263	
+   264	        <form
+   265	          className="toolbar"
+   266	          role="search"
+   267	          onSubmit={(event) => {
+   268	            event.preventDefault();
+   269	            setSearch(toSearchQuery(searchText));
+   270	          }}
+   271	        >
+   272	          <label className="field field-grow">
+   273	            <span className="field-label">Search</span>
+   274	            <input
+   275	              type="search"
+   276	              value={searchText}
+   277	              maxLength={100}
+   278	              placeholder="Learner name or serial number"
+   279	              onChange={(event) => setSearchText(event.target.value)}
+   280	              data-testid="search-input"
+   281	            />
+   282	          </label>
+   283	          <label className="field">
+   284	            <span className="field-label">Status</span>
+   285	            <select value={status} onChange={(event) => setStatus(event.target.value)} data-testid="status-filter">
+   286	              <option value="all">All</option>
+   287	              <option value="active">Active</option>
+   288	              <option value="revoked">Revoked</option>
+   289	            </select>
+   290	          </label>
+   291	          <label className="field">
+   292	            <span className="field-label">Sort by</span>
+   293	            <select
+   294	              value={`${sort.field}:${sort.order}`}
+   295	              onChange={(event) => {
+   296	                const [field, order] = event.target.value.split(':');
+   297	                setSort({ field, order });
+   298	              }}
+   299	              data-testid="sort-select"
+   300	            >
+   301	              {SORT_OPTIONS.map((option) => (
+   302	                <option key={option.value} value={option.value}>
+   303	                  {option.label}
+   304	                </option>
+   305	              ))}
+   306	            </select>
+   307	          </label>
+   308	          <label className="field">
+   309	            <span className="field-label">Rows per page</span>
+   310	            <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))} data-testid="page-size">
+   311	              {PAGE_SIZES.map((size) => (
+   312	                <option key={size} value={size}>
+   313	                  {size}
+   314	                </option>
+   315	              ))}
+   316	            </select>
+   317	          </label>
+   318	        </form>
+   319	
+   320	        <div className="export-status" aria-live="polite">
+   321	          {exportState.status === 'running' ? (
+   322	            <p className="note">
+   323	              Preparing the export for the current search and sort order. Large exports can take a moment; you can keep
+   324	              working meanwhile. Leaving this page cancels the export.
+   325	            </p>
+   326	          ) : null}
+   327	          {exportState.status === 'done' ? (
+   328	            <p className="note note-success" data-testid="export-done">
+   329	              Export saved as <strong>{exportState.fileName}</strong> ({formatBytes(exportState.bytes)}).{' '}
+   330	              <button type="button" className="link" onClick={() => setExportState({ status: 'idle' })}>
+   331	                Dismiss
+   332	              </button>
+   333	            </p>
+   334	          ) : null}
+   335	          {exportState.status === 'error' ? (
+   336	            <p className="note note-error" role="alert">
+   337	              Export failed: {exportState.error.message}{' '}
+   338	              <button type="button" className="link" onClick={handleExport}>
+   339	                Try again
+   340	              </button>
+   341	            </p>
+   342	          ) : null}
+   343	        </div>
+   344	
+   345	        <div className="table-wrap" aria-busy={list.status === 'loading'} data-testid="certificate-list" data-state={list.status}>
+   346	          {list.status === 'error' ? (
+   347	            <ErrorState title="Certificates could not be loaded" error={list.error} onRetry={list.reload} />
+   348	          ) : isFirstLoad ? (
+   349	            <div className="state state-loading" data-testid="list-loading">
+   350	              <Spinner label="Loading certificates…" />
+   351	            </div>
+   352	          ) : data.items.length === 0 && !isRefreshing ? (
+   353	            hasFilters ? (
+   354	              <EmptyState
+   355	                title="No certificates match your search"
+   356	                action={
+   357	                  <button type="button" className="btn" onClick={clearFilters}>
+   358	                    Clear search and filters
+   359	                  </button>
+   360	                }
+   361	              >
+   362	                {search ? `Nothing found for “${search}”` : 'Nothing found'}
+   363	                {status !== 'all' ? ` with status ${status}` : ''}. Search looks at learner names and serial numbers.
+   364	              </EmptyState>
+   365	            ) : (
+   366	              <EmptyState
+   367	                title="No certificates yet"
+   368	                action={
+   369	                  <a className="btn btn-primary" href="#/bulk-issue">
+   370	                    Go to bulk issue
+   371	                  </a>
+   372	                }
+   373	              >
+   374	                Certificates appear here once they have been issued for a course.
+   375	              </EmptyState>
+   376	            )
+   377	          ) : (
+   378	            <table className={isRefreshing ? 'data-table is-refreshing' : 'data-table'}>
+   379	              <thead>
+   380	                <tr>
+   381	                  {COLUMNS.map((column) => {
+   382	                    const active = sort.field === column.field;
+   383	                    return (
+   384	                      <th
+   385	                        key={column.field}
+   386	                        scope="col"
+   387	                        aria-sort={active ? (sort.order === 'asc' ? 'ascending' : 'descending') : 'none'}
+   388	                      >
+   389	                        <button type="button" className="th-button" onClick={() => sortBy(column)} title={`Sort by ${column.label.toLowerCase()}`}>
+   390	                          {column.label}
+   391	                          {column.field === 'issued' ? <span className="th-hint"> ({actor.tenant.timezone})</span> : null}
+   392	                          <span className="sort-arrow" aria-hidden="true">
+   393	                            {active ? (sort.order === 'asc' ? '▲' : '▼') : '↕'}
+   394	                          </span>
+   395	                        </button>
+   396	                      </th>
+   397	                    );
+   398	                  })}
+   399	                </tr>
+   400	              </thead>
+   401	              <tbody>
+   402	                {data.items.map((certificate) => (
+   403	                  <tr
+   404	                    key={certificate.id}
+   405	                    className={certificate.id === selectedCertificateId ? 'row-link row-selected' : 'row-link'}
+   406	                    onClick={() => navigate(`/certificates/${certificate.id}`)}
+   407	                  >
+   408	                    <td>
+   409	                      <a
+   410	                        href={`#/certificates/${certificate.id}`}
+   411	                        className="mono"
+   412	                        onClick={(event) => event.stopPropagation()}
+   413	                      >
+   414	                        {certificate.serialNumber}
+   415	                      </a>
+   416	                    </td>
+   417	                    <td>{certificate.learnerName}</td>
+   418	                    <td>{certificate.courseTitle}</td>
+   419	                    <td className="nowrap" title={`${certificate.issuedAt} (UTC)`}>
+   420	                      {certificate.issuedLocal}
+   421	                    </td>
+   422	                    <td>
+   423	                      <StatusBadge status={certificate.status} />
+   424	                    </td>
+   425	                  </tr>
+   426	                ))}
+   427	              </tbody>
+   428	            </table>
+   429	          )}
+   430	          {isRefreshing ? (
+   431	            <div className="refreshing" data-testid="list-refreshing">
+   432	              <Spinner label="Loading…" />
+   433	            </div>
+   434	          ) : null}
+   435	        </div>
+   436	
+   437	        {data && list.status !== 'error' ? (
+   438	          <Pagination
+   439	            page={page}
+   440	            totalPages={data.totalPages}
+   441	            total={data.total}
+   442	            pageSize={pageSize}
+   443	            itemCount={data.items.length}
+   444	            disabled={list.status === 'loading'}
+   445	            onPageChange={setPage}
+   446	          />
+   447	        ) : null}
+   448	      </section>
+   449	
+   450	      {selectedCertificateId !== null ? (
+   451	        <CertificateDetail
+   452	          key={selectedCertificateId}
+   453	          api={api}
+   454	          certificateId={selectedCertificateId}
+   455	          onClose={() => navigate('/certificates')}
+   456	          onChanged={list.reload}
+   457	        />
+   458	      ) : null}
+   459	    </>
+   460	  );
+   461	}
+   462	import { useEffect, useRef } from 'react';
+   463	
+   464	export function Spinner({ label }) {
+   465	  return (
+   466	    <span className="spinner-wrap" role="status">
+   467	      <span className="spinner" aria-hidden="true" />
+   468	      {label ? <span>{label}</span> : <span className="sr-only">Loading</span>}
+   469	    </span>
+   470	  );
+   471	}
+   472	
+   473	const STATUS_LABELS = { active: 'Active', revoked: 'Revoked' };
+   474	
+   475	export function StatusBadge({ status }) {
+   476	  return <span className={`badge badge-${status}`}>{STATUS_LABELS[status] ?? status}</span>;
+   477	}
+   478	
+   479	const OUTCOME_LABELS = { issued: 'Issued', skipped: 'Skipped', failed: 'Failed' };
+   480	
+   481	export function OutcomeBadge({ outcome }) {
+   482	  return <span className={`badge badge-${outcome}`}>{OUTCOME_LABELS[outcome] ?? outcome}</span>;
+   483	}
+   484	
+   485	/** Error panel with the server's message and, when it makes sense, a way to try again. */
+   486	export function ErrorState({ title = 'Something went wrong', error, onRetry, retryLabel = 'Try again' }) {
+   487	  return (
+   488	    <div className="state state-error" role="alert">
+   489	      <div className="state-icon" aria-hidden="true">
+   490	        !
+   491	      </div>
+   492	      <div className="state-body">
+   493	        <strong>{title}</strong>
+   494	        <p>{error?.message ?? 'Unexpected error'}</p>
+   495	        {error?.status ? <p className="muted small">HTTP {error.status}{error.code ? ` · ${error.code}` : ''}</p> : null}
+   496	      </div>
+   497	      {onRetry ? (
+   498	        <button type="button" className="btn" onClick={onRetry}>
+   499	          {retryLabel}
+   500	        </button>
+   501	      ) : null}
+   502	    </div>
+   503	  );
+   504	}
+   505	
+   506	export function EmptyState({ title, children, action }) {
+   507	  return (
+   508	    <div className="state state-empty">
+   509	      <div className="state-body">
+   510	        <strong>{title}</strong>
+   511	        {children ? <p>{children}</p> : null}
+   512	      </div>
+   513	      {action}
+   514	    </div>
+   515	  );
+   516	}
+   517	
+   518	export function Pagination({ page, totalPages, total, pageSize, itemCount, disabled, onPageChange, noun = 'certificates' }) {
+   519	  const first = total === 0 ? 0 : (page - 1) * pageSize + 1;
+   520	  const last = total === 0 ? 0 : first + itemCount - 1;
+   521	  const format = (n) => n.toLocaleString('en-US');
+   522	  return (
+   523	    <nav className="pagination" aria-label="Pagination">
+   524	      <span className="muted" aria-live="polite">
+   525	        {total === 0 ? `No ${noun}` : `${format(first)}–${format(last)} of ${format(total)} ${noun}`}
+   526	      </span>
+   527	      <div className="pagination-buttons">
+   528	        <button type="button" className="btn btn-small" disabled={disabled || page <= 1} onClick={() => onPageChange(1)}>
+   529	          « First
+   530	        </button>
+   531	        <button type="button" className="btn btn-small" disabled={disabled || page <= 1} onClick={() => onPageChange(page - 1)}>
+   532	          ‹ Previous
+   533	        </button>
+   534	        <span className="pagination-page">
+   535	          Page {format(page)} of {format(totalPages)}
+   536	        </span>
+   537	        <button
+   538	          type="button"
+   539	          className="btn btn-small"
+   540	          disabled={disabled || page >= totalPages}
+   541	          onClick={() => onPageChange(page + 1)}
+   542	        >
+   543	          Next ›
+   544	        </button>
+   545	        <button
+   546	          type="button"
+   547	          className="btn btn-small"
+   548	          disabled={disabled || page >= totalPages}
+   549	          onClick={() => onPageChange(totalPages)}
+   550	        >
+   551	          Last »
+   552	        </button>
+   553	      </div>
+   554	    </nav>
+   555	  );
+   556	}
+   557	
+   558	/**
+   559	 * Modal layer used for the certificate drawer and the revoke confirmation.
+   560	 * Escape and a click on the backdrop close it (unless `locked`, e.g. while a request is running);
+   561	 * focus moves into the dialog on open and returns to the previously focused element on close.
+   562	 */
+   563	export function Dialog({ title, onClose, locked = false, variant = 'modal', children, labelledBy, describedBy }) {
+   564	  const panelRef = useRef(null);
+   565	  const onCloseRef = useRef(onClose);
+   566	  onCloseRef.current = onClose;
+   567	  const lockedRef = useRef(locked);
+   568	  lockedRef.current = locked;
+   569	
+   570	  useEffect(() => {
+   571	    const panel = panelRef.current;
+   572	    const previouslyFocused = document.activeElement;
+   573	    panel?.focus();
+   574	    const onKeyDown = (event) => {
+   575	      if (event.key !== 'Escape' || lockedRef.current) return;
+   576	      // Only the top-most dialog reacts, so Escape closes the confirmation before the drawer.
+   577	      const dialogs = document.querySelectorAll('[role="dialog"]');
+   578	      if (dialogs[dialogs.length - 1] === panelRef.current) {
+   579	        event.stopPropagation();
+   580	        onCloseRef.current();
+   581	      }
+   582	    };
+   583	    document.addEventListener('keydown', onKeyDown);
+   584	    return () => {
+   585	      document.removeEventListener('keydown', onKeyDown);
+   586	      if (previouslyFocused instanceof HTMLElement && document.contains(previouslyFocused)) {
+   587	        previouslyFocused.focus();
+   588	        return;
+   589	      }
+   590	      // The element that opened this dialog no longer exists (the Revoke button of a certificate
+   591	      // that is revoked now). The focus would then drop to <body>, behind a dialog that is still
+   592	      // open, and the next Tab would leave it: hand the focus to the top-most remaining dialog.
+   593	      const remaining = [...document.querySelectorAll('[role="dialog"]')].filter((dialog) => dialog !== panel);
+   594	      remaining[remaining.length - 1]?.focus();
+   595	    };
+   596	  }, []);
+   597	
+   598	  return (
+   599	    <div
+   600	      className={`overlay overlay-${variant}`}
+   601	      onMouseDown={(event) => {
+   602	        if (event.target === event.currentTarget && !locked) onClose();
+   603	      }}
+   604	    >
+   605	      <div
+   606	        ref={panelRef}
+   607	        className={`dialog dialog-${variant}`}
+   608	        role="dialog"
+   609	        aria-modal="true"
+   610	        aria-label={labelledBy ? undefined : title}
+   611	        aria-labelledby={labelledBy}
+   612	        aria-describedby={describedBy}
+   613	        tabIndex={-1}
+   614	      >
+   615	        {children}
+   616	      </div>
+   617	    </div>
+   618	  );
+   619	}
+   620	import { Component } from 'react';
+   621	
+   622	import { parseHash } from '../hooks.js';
+   623	
+   624	function goToCertificateList() {
+   625	  window.location.hash = '#/certificates';
+   626	  window.location.reload(); // a fresh start there, not a re-render of whatever just failed
+   627	}
+   628	
+   629	/**
+   630	 * Last line of defence. Without a boundary React unmounts the whole tree when rendering throws,
+   631	 * leaving a blank page with no explanation. Malformed server answers are already turned into the
+   632	 * regular error states by api.js; this catches what nobody anticipated (a bug, or data that passed
+   633	 * those checks and still cannot be displayed).
+   634	 *
+   635	 * Reloading helps when the problem was a passing one. It does not help when the open page itself is
+   636	 * what cannot be displayed: a deep link to a record with unusable data fails again after every
+   637	 * reload. From such a link the panel therefore also leads back to the certificate list, the place
+   638	 * every other page is reached from.
+   639	 */
+   640	export default class ErrorBoundary extends Component {
+   641	  state = { error: null };
+   642	
+   643	  static getDerivedStateFromError(error) {
+   644	    return { error };
+   645	  }
+   646	
+   647	  render() {
+   648	    const { error } = this.state;
+   649	    if (error === null) return this.props.children;
+   650	    const route = parseHash(window.location.hash);
+   651	    const onCertificateList = route.view === 'certificates' && route.certificateId === null;
+   652	    return (
+   653	      <div className="boot">
+   654	        <div className="state state-error" role="alert" data-testid="app-crashed">
+   655	          <div className="state-icon" aria-hidden="true">
+   656	            !
+   657	          </div>
+   658	          <div className="state-body">
+   659	            <strong>The console ran into an unexpected problem</strong>
+   660	            <p>
+   661	              This page could not be displayed. Reload the console to continue.
+   662	              {onCertificateList ? null : ' If the problem comes back, go to the certificate list instead.'}
+   663	            </p>
+   664	            {/* What the runtime reported is for whoever looks into the problem, not for the admin:
+   665	                in a production build it is a minified framework message. */}
+   666	            <details className="muted small">
+   667	              <summary>Technical details</summary>
+   668	              {String(error?.message || error)}
+   669	            </details>
+   670	          </div>
+   671	          <div className="state-actions">
+   672	            <button type="button" className="btn" onClick={() => window.location.reload()}>
+   673	              Reload the console
+   674	            </button>
+   675	            {onCertificateList ? null : (
+   676	              <button type="button" className="btn" onClick={goToCertificateList}>
+   677	                Go to the certificate list
+   678	              </button>
+   679	            )}
+   680	          </div>
+   681	        </div>
+   682	      </div>
+   683	    );
+   684	  }
+   685	}
+   686	import { StrictMode } from 'react';
+   687	import { createRoot } from 'react-dom/client';
+   688	
+   689	import App from './App.jsx';
+   690	import './styles.css';
+   691	
+   692	createRoot(document.getElementById('root')).render(
+   693	  <StrictMode>
+   694	    <App />
+   695	  </StrictMode>,
+   696	);

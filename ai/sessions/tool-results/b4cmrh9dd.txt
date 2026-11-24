@@ -1,0 +1,677 @@
+     1	/**
+     2	 * Low-level write primitives shared by the API, the demo seed and the load-test generator.
+     3	 * All of them expect to run inside a transaction owned by the caller.
+     4	 */
+     5	import { localDate, toUtcIso } from '../lib/time.js';
+     6	
+     7	export const AUDIT_ACTIONS = Object.freeze({
+     8	  ISSUED: 'certificate.issued',
+     9	  REVOKED: 'certificate.revoked',
+    10	});
+    11	
+    12	export function formatSerial(tenantCode, sequence) {
+    13	  return `${tenantCode}-${String(sequence).padStart(7, '0')}`;
+    14	}
+    15	
+    16	/** Reserves `count` consecutive serial numbers for a tenant and returns the first sequence value. */
+    17	export function reserveSerials(db, tenantId, count = 1) {
+    18	  const { changes } = db.run('UPDATE tenants SET last_serial = last_serial + @count WHERE id = @tenantId', {
+    19	    count,
+    20	    tenantId,
+    21	  });
+    22	  if (changes !== 1) throw new Error(`Unknown tenant ${tenantId}`);
+    23	  const { last_serial: last } = db.get('SELECT last_serial FROM tenants WHERE id = @tenantId', { tenantId });
+    24	  return last - count + 1;
+    25	}
+    26	
+    27	export function recordAuditEvent(db, event) {
+    28	  return db.run(
+    29	    `INSERT INTO audit_events (tenant_id, actor_admin_id, actor_email, action, certificate_id, bulk_operation_id, details, created_at)
+    30	     VALUES (@tenantId, @actorAdminId, @actorEmail, @action, @certificateId, @bulkOperationId, @details, @createdAt)`,
+    31	    {
+    32	      tenantId: event.tenantId,
+    33	      actorAdminId: event.actorAdminId ?? null,
+    34	      actorEmail: event.actorEmail,
+    35	      action: event.action,
+    36	      certificateId: event.certificateId,
+    37	      bulkOperationId: event.bulkOperationId ?? null,
+    38	      details: JSON.stringify(event.details ?? {}),
+    39	      createdAt: event.createdAt,
+    40	    },
+    41	  ).lastInsertRowid;
+    42	}
+    43	
+    44	/**
+    45	 * Issues one certificate and writes its `certificate.issued` audit event.
+    46	 *
+    47	 * `tenant` is `{ id, code, timezone }`, `actor` is `{ adminId, email }`.
+    48	 * Throws if the learner already has a certificate for the course (UNIQUE constraint).
+    49	 */
+    50	export function issueCertificate(db, { tenant, actor, course, learner, enrollmentId, issuedAt, bulkOperationId = null, auditDetails = {} }) {
+    51	  const issuedAtIso = toUtcIso(issuedAt);
+    52	  const serialNumber = formatSerial(tenant.code, reserveSerials(db, tenant.id, 1));
+    53	  const certificateId = db.run(
+    54	    `INSERT INTO certificates (tenant_id, course_id, learner_id, enrollment_id, serial_number, learner_name, course_title,
+    55	                               status, issued_at, issued_local_date, issued_by_admin_id, bulk_operation_id)
+    56	     VALUES (@tenantId, @courseId, @learnerId, @enrollmentId, @serialNumber, @learnerName, @courseTitle,
+    57	             'active', @issuedAt, @issuedLocalDate, @issuedByAdminId, @bulkOperationId)`,
+    58	    {
+    59	      tenantId: tenant.id,
+    60	      courseId: course.id,
+    61	      learnerId: learner.id,
+    62	      enrollmentId: enrollmentId ?? null,
+    63	      serialNumber,
+    64	      learnerName: learner.name,
+    65	      courseTitle: course.title,
+    66	      issuedAt: issuedAtIso,
+    67	      issuedLocalDate: localDate(issuedAtIso, tenant.timezone),
+    68	      issuedByAdminId: actor.adminId ?? null,
+    69	      bulkOperationId,
+    70	    },
+    71	  ).lastInsertRowid;
+    72	
+    73	  recordAuditEvent(db, {
+    74	    tenantId: tenant.id,
+    75	    actorAdminId: actor.adminId,
+    76	    actorEmail: actor.email,
+    77	    action: AUDIT_ACTIONS.ISSUED,
+    78	    certificateId,
+    79	    bulkOperationId,
+    80	    createdAt: issuedAtIso,
+    81	    details: {
+    82	      serialNumber,
+    83	      learnerId: learner.id,
+    84	      learnerName: learner.name,
+    85	      courseId: course.id,
+    86	      courseTitle: course.title,
+    87	      ...auditDetails,
+    88	    },
+    89	  });
+    90	
+    91	  return { id: certificateId, serialNumber, issuedAt: issuedAtIso };
+    92	}
+    93	
+    94	/**
+    95	 * Revokes an active certificate and writes its `certificate.revoked` audit event.
+    96	 * Returns false (and writes nothing) when the certificate is not active any more, which is what
+    97	 * makes repeated or racing revoke requests harmless.
+    98	 */
+    99	export function revokeCertificate(db, { tenantId, certificateId, actor, revokedAt, reason = null }) {
+   100	  const revokedAtIso = toUtcIso(revokedAt);
+   101	  const { changes } = db.run(
+   102	    `UPDATE certificates
+   103	        SET status = 'revoked', revoked_at = @revokedAt, revoked_by_admin_id = @adminId, revocation_reason = @reason
+   104	      WHERE id = @certificateId AND tenant_id = @tenantId AND status = 'active'`,
+   105	    { revokedAt: revokedAtIso, adminId: actor.adminId ?? null, reason, certificateId, tenantId },
+   106	  );
+   107	  if (changes !== 1) return false;
+   108	
+   109	  const { serial_number: serialNumber } = db.get('SELECT serial_number FROM certificates WHERE id = @certificateId', {
+   110	    certificateId,
+   111	  });
+   112	  recordAuditEvent(db, {
+   113	    tenantId,
+   114	    actorAdminId: actor.adminId,
+   115	    actorEmail: actor.email,
+   116	    action: AUDIT_ACTIONS.REVOKED,
+   117	    certificateId,
+   118	    createdAt: revokedAtIso,
+   119	    details: { serialNumber, reason, previousStatus: 'active' },
+   120	  });
+   121	  return true;
+   122	}
+   123	/**
+   124	 * Courses and their rosters. The roster view is the "review completions" step: it shows, per
+   125	 * learner, exactly what a bulk issue would do, using the same classification the issue path uses.
+   126	 */
+   127	import { notFound } from '../lib/errors.js';
+   128	import { queryInteger } from '../lib/params.js';
+   129	import { localDateTime } from '../lib/time.js';
+   130	
+   131	export const SKIP_REASONS = Object.freeze({
+   132	  ALREADY_CERTIFIED: 'already_certified',
+   133	  CERTIFICATE_REVOKED: 'certificate_revoked',
+   134	  NOT_COMPLETED: 'not_completed',
+   135	});
+   136	
+   137	const ENROLLMENT_LABELS = { not_started: 'not started', in_progress: 'in progress', completed: 'completed' };
+   138	
+   139	/**
+   140	 * Decides what a bulk issue does with one roster row.
+   141	 * Eligible = enrollment completed and no certificate has ever been issued for (course, learner).
+   142	 */
+   143	export function classifyEnrollment(row) {
+   144	  if (row.certificate_id !== null && row.certificate_status === 'revoked') {
+   145	    return {
+   146	      eligible: false,
+   147	      reason: SKIP_REASONS.CERTIFICATE_REVOKED,
+   148	      message: `Certificate ${row.serial_number} was revoked; revoked certificates are not re-issued automatically`,
+   149	    };
+   150	  }
+   151	  if (row.certificate_id !== null) {
+   152	    return {
+   153	      eligible: false,
+   154	      reason: SKIP_REASONS.ALREADY_CERTIFIED,
+   155	      message: `Already certified (certificate ${row.serial_number})`,
+   156	    };
+   157	  }
+   158	  if (row.enrollment_status !== 'completed') {
+   159	    return {
+   160	      eligible: false,
+   161	      reason: SKIP_REASONS.NOT_COMPLETED,
+   162	      message: `Course not completed (enrollment is ${ENROLLMENT_LABELS[row.enrollment_status] ?? row.enrollment_status})`,
+   163	    };
+   164	  }
+   165	  return { eligible: true, reason: null, message: 'Completed, not yet certified' };
+   166	}
+   167	
+   168	const ROSTER_SQL = `
+   169	  SELECT e.id AS enrollment_id, e.status AS enrollment_status, e.completed_at,
+   170	         l.id AS learner_id, l.full_name AS learner_name,
+   171	         c.id AS certificate_id, c.serial_number, c.status AS certificate_status
+   172	    FROM enrollments e
+   173	    JOIN learners l ON l.id = e.learner_id AND l.tenant_id = e.tenant_id
+   174	    LEFT JOIN certificates c
+   175	           ON c.tenant_id = e.tenant_id AND c.course_id = e.course_id AND c.learner_id = e.learner_id
+   176	   WHERE e.tenant_id = @tenantId AND e.course_id = @courseId
+   177	   ORDER BY l.full_name COLLATE NOCASE, l.id`;
+   178	
+   179	/** Every enrollment of a course with its certificate (if any), in a stable order. */
+   180	export function loadRoster(db, tenantId, courseId) {
+   181	  return db.all(ROSTER_SQL, { tenantId, courseId });
+   182	}
+   183	
+   184	/** Looks a course up inside the actor's tenant only; other tenants' courses do not exist for them. */
+   185	export function findCourse(db, actor, courseId) {
+   186	  if (courseId === null) return null;
+   187	  const row = db.get('SELECT id, title FROM courses WHERE id = @courseId AND tenant_id = @tenantId', {
+   188	    courseId,
+   189	    tenantId: actor.tenantId,
+   190	  });
+   191	  return row ? { id: row.id, title: row.title } : null;
+   192	}
+   193	
+   194	export function listCourses(db, actor) {
+   195	  return db
+   196	    .all(
+   197	      `SELECT id, title, is_generated FROM courses WHERE tenant_id = @tenantId
+   198	        ORDER BY is_generated, title COLLATE NOCASE, id`,
+   199	      { tenantId: actor.tenantId },
+   200	    )
+   201	    .map((row) => ({ id: row.id, title: row.title, isGenerated: row.is_generated === 1 }));
+   202	}
+   203	
+   204	/** Roster page plus per-course totals for the bulk-issue screen. */
+   205	export function getCourseRoster(db, actor, courseId, query) {
+   206	  const page = queryInteger(query, ['page'], { min: 1, max: 1_000_000, fallback: 1 });
+   207	  const pageSize = queryInteger(query, ['pageSize', 'page_size', 'per_page', 'limit'], { min: 1, max: 100, fallback: 50 });
+   208	
+   209	  return db.transaction(
+   210	    () => {
+   211	      const course = findCourse(db, actor, courseId);
+   212	      if (!course) throw notFound('Course');
+   213	
+   214	      const params = { tenantId: actor.tenantId, courseId: course.id };
+   215	      const totals = db.get(
+   216	        `SELECT COUNT(*) AS enrolled,
+   217	                COALESCE(SUM(e.status = 'completed'), 0) AS completed,
+   218	                COALESCE(SUM(c.status = 'active'), 0) AS certified,
+   219	                COALESCE(SUM(c.status = 'revoked'), 0) AS revoked,
+   220	                COALESCE(SUM(e.status = 'completed' AND c.id IS NULL), 0) AS eligible
+   221	           FROM enrollments e
+   222	           LEFT JOIN certificates c
+   223	                  ON c.tenant_id = e.tenant_id AND c.course_id = e.course_id AND c.learner_id = e.learner_id
+   224	          WHERE e.tenant_id = @tenantId AND e.course_id = @courseId`,
+   225	        params,
+   226	      );
+   227	      const rows = db.all(`${ROSTER_SQL} LIMIT @limit OFFSET @offset`, {
+   228	        ...params,
+   229	        limit: pageSize,
+   230	        offset: (page - 1) * pageSize,
+   231	      });
+   232	
+   233	      return {
+   234	        course,
+   235	        summary: {
+   236	          enrolled: totals.enrolled,
+   237	          completed: totals.completed,
+   238	          incomplete: totals.enrolled - totals.completed,
+   239	          certified: totals.certified,
+   240	          revoked: totals.revoked,
+   241	          eligible: totals.eligible,
+   242	        },
+   243	        items: rows.map((row) => {
+   244	          const verdict = classifyEnrollment(row);
+   245	          return {
+   246	            learnerId: row.learner_id,
+   247	            learnerName: row.learner_name,
+   248	            enrollmentId: row.enrollment_id,
+   249	            enrollmentStatus: row.enrollment_status,
+   250	            completedAt: row.completed_at,
+   251	            completedLocal: row.completed_at ? localDateTime(row.completed_at, actor.timezone) : null,
+   252	            certificateId: row.certificate_id,
+   253	            serialNumber: row.serial_number,
+   254	            certificateStatus: row.certificate_status,
+   255	            eligible: verdict.eligible,
+   256	            reason: verdict.reason,
+   257	            message: verdict.message,
+   258	          };
+   259	        }),
+   260	        page,
+   261	        pageSize,
+   262	        total: totals.enrolled,
+   263	        totalPages: Math.max(1, Math.ceil(totals.enrolled / pageSize)),
+   264	      };
+   265	    },
+   266	    { immediate: false },
+   267	  );
+   268	}
+   269	/**
+   270	 * Actor context. There is no login in this console: each request names its actor in the
+   271	 * `X-Actor-Email` header and the server derives the tenant from that admin record. The tenant is
+   272	 * never taken from the URL, query string or body, so a caller cannot ask for someone else's data.
+   273	 */
+   274	import { HttpError } from '../lib/errors.js';
+   275	
+   276	export const ACTOR_HEADER = 'X-Actor-Email';
+   277	
+   278	const ACTOR_SQL = `
+   279	  SELECT a.id AS adminId, a.email AS email, a.display_name AS displayName,
+   280	         t.id AS tenantId, t.name AS tenantName, t.code AS tenantCode, t.timezone AS timezone
+   281	    FROM admins a
+   282	    JOIN tenants t ON t.id = a.tenant_id`;
+   283	
+   284	export function findActorByEmail(db, email) {
+   285	  const row = db.get(`${ACTOR_SQL} WHERE a.email = @email`, { email });
+   286	  return row ? { ...row } : null;
+   287	}
+   288	
+   289	/** Demo convenience for the actor switcher: the seeded admins and the tenant each one is bound to. */
+   290	export function listActors(db) {
+   291	  return db.all(`${ACTOR_SQL} ORDER BY t.id, a.id`).map((row) => ({
+   292	    email: row.email,
+   293	    displayName: row.displayName,
+   294	    tenant: { name: row.tenantName, timezone: row.timezone },
+   295	  }));
+   296	}
+   297	
+   298	export function describeActor(actor) {
+   299	  return {
+   300	    email: actor.email,
+   301	    displayName: actor.displayName,
+   302	    tenant: { id: actor.tenantId, name: actor.tenantName, code: actor.tenantCode, timezone: actor.timezone },
+   303	  };
+   304	}
+   305	
+   306	/** Express middleware: resolves `req.actor` or rejects the request with 401. */
+   307	export function requireActor(db) {
+   308	  return function actorContext(req, _res, next) {
+   309	    const email = (req.get(ACTOR_HEADER) ?? '').trim();
+   310	    if (!email) {
+   311	      throw new HttpError(401, 'actor_required', `Missing ${ACTOR_HEADER} header`);
+   312	    }
+   313	    const actor = findActorByEmail(db, email);
+   314	    if (!actor) {
+   315	      throw new HttpError(401, 'unknown_actor', `No admin account matches ${ACTOR_HEADER} "${email.slice(0, 120)}"`);
+   316	    }
+   317	    req.actor = actor;
+   318	    next();
+   319	  };
+   320	}
+   321	/** RFC 4180 style CSV encoding with spreadsheet formula-injection hardening. */
+   322	
+   323	const NEEDS_QUOTING = /[",\r\n]/;
+   324	const FORMULA_TRIGGER = /^[=+\-@\t\r]/;
+   325	
+   326	export function csvCell(value) {
+   327	  let text = value === null || value === undefined ? '' : String(value);
+   328	  // A cell that starts with = + - @ is executed as a formula by Excel/Sheets. Learner names are
+   329	  // user-controlled, so neutralise those with a leading apostrophe (OWASP CSV-injection guidance).
+   330	  if (FORMULA_TRIGGER.test(text)) text = `'${text}`;
+   331	  return NEEDS_QUOTING.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+   332	}
+   333	
+   334	export function csvRow(cells) {
+   335	  let line = '';
+   336	  for (let i = 0; i < cells.length; i += 1) {
+   337	    if (i > 0) line += ',';
+   338	    line += csvCell(cells[i]);
+   339	  }
+   340	  return `${line}\n`;
+   341	}
+   342	/** An error that maps directly to an HTTP response: `{ error: { code, message, details? } }`. */
+   343	export class HttpError extends Error {
+   344	  constructor(status, code, message, details) {
+   345	    super(message);
+   346	    this.name = 'HttpError';
+   347	    this.status = status;
+   348	    this.code = code;
+   349	    this.details = details;
+   350	  }
+   351	}
+   352	
+   353	export const badRequest = (message, details) => new HttpError(400, 'invalid_request', message, details);
+   354	
+   355	/**
+   356	 * Used for both "does not exist" and "belongs to another tenant" so that responses never reveal
+   357	 * whether an id exists outside the caller's tenant.
+   358	 */
+   359	export const notFound = (what) => new HttpError(404, 'not_found', `${what} not found`);
+   360	import { createHash } from 'node:crypto';
+   361	
+   362	/**
+   363	 * JSON with object keys sorted at every level, so logically equal payloads serialise identically.
+   364	 * Iterative on purpose: request bodies are attacker-controlled and JSON.parse accepts nesting far
+   365	 * deeper than the call stack, so a recursive walk could be made to overflow.
+   366	 */
+   367	export function canonicalJson(value) {
+   368	  const out = [];
+   369	  // Work stack of things still to emit: literal strings, or { value } entries to serialise.
+   370	  const stack = [{ value }];
+   371	  while (stack.length > 0) {
+   372	    const item = stack.pop();
+   373	    if (typeof item === 'string') {
+   374	      out.push(item);
+   375	      continue;
+   376	    }
+   377	    const current = item.value;
+   378	    if (current === null || typeof current !== 'object') {
+   379	      out.push(JSON.stringify(current) ?? 'null');
+   380	    } else if (Array.isArray(current)) {
+   381	      stack.push(']');
+   382	      for (let i = current.length - 1; i >= 0; i -= 1) {
+   383	        stack.push({ value: current[i] });
+   384	        if (i > 0) stack.push(',');
+   385	      }
+   386	      out.push('[');
+   387	    } else {
+   388	      const keys = Object.keys(current)
+   389	        .filter((key) => current[key] !== undefined)
+   390	        .sort();
+   391	      stack.push('}');
+   392	      for (let i = keys.length - 1; i >= 0; i -= 1) {
+   393	        stack.push({ value: current[keys[i]] });
+   394	        stack.push(`${JSON.stringify(keys[i])}:`);
+   395	        if (i > 0) stack.push(',');
+   396	      }
+   397	      out.push('{');
+   398	    }
+   399	  }
+   400	  return out.join('');
+   401	}
+   402	
+   403	/**
+   404	 * Stable hash of a request, used to tell an honest retry (same key, same request) apart from
+   405	 * idempotency-key misuse (same key, different request).
+   406	 */
+   407	export function requestFingerprint(method, route, body) {
+   408	  return createHash('sha256')
+   409	    .update(`${method.toUpperCase()} ${route}\n${canonicalJson(body ?? null)}`)
+   410	    .digest('hex');
+   411	}
+   412	/** Small request-parameter parsers that fail with a 400 instead of guessing. */
+   413	import { badRequest } from './errors.js';
+   414	
+   415	const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+   416	const CONTROL_CHARS_EXCEPT_LINE_BREAKS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+   417	
+   418	/**
+   419	 * Rejects text that could not be stored and read back faithfully: NUL and other control
+   420	 * characters, and unpaired surrogates (which are not valid UTF-8 once written to SQLite).
+   421	 */
+   422	export function assertPlainText(value, label, { allowLineBreaks = false } = {}) {
+   423	  const forbidden = allowLineBreaks ? CONTROL_CHARS_EXCEPT_LINE_BREAKS : CONTROL_CHARS;
+   424	  if (forbidden.test(value) || !value.isWellFormed()) {
+   425	    throw badRequest(`${label} contains characters that are not allowed (control characters or malformed Unicode)`);
+   426	  }
+   427	}
+   428	
+   429	/** First of the given query parameter names that is present, as a trimmed string. */
+   430	export function queryString(query, names, { maxLength = 200 } = {}) {
+   431	  for (const name of names) {
+   432	    const value = query[name];
+   433	    if (value === undefined) continue;
+   434	    if (typeof value !== 'string') throw badRequest(`Query parameter "${name}" must be a single value`);
+   435	    const text = value.trim();
+   436	    assertPlainText(text, `Query parameter "${name}"`);
+   437	    if (text.length > maxLength) throw badRequest(`Query parameter "${name}" must be at most ${maxLength} characters`);
+   438	    return text;
+   439	  }
+   440	  return undefined;
+   441	}
+   442	
+   443	export function queryInteger(query, names, { min, max, fallback }) {
+   444	  for (const name of names) {
+   445	    if (query[name] === undefined) continue;
+   446	    const text = queryString(query, [name]);
+   447	    if (!/^\d{1,9}$/.test(text)) throw badRequest(`Query parameter "${name}" must be a whole number`);
+   448	    const value = Number(text);
+   449	    if (value < min || value > max) throw badRequest(`Query parameter "${name}" must be between ${min} and ${max}`);
+   450	    return value;
+   451	  }
+   452	  return fallback;
+   453	}
+   454	
+   455	/** Positive integer id taken from a path segment; anything else is treated as "no such record". */
+   456	export function pathId(value) {
+   457	  return typeof value === 'string' && /^[1-9]\d{0,14}$/.test(value) ? Number(value) : null;
+   458	}
+   459	/**
+   460	 * Time-zone helpers built on the ICU data that ships with Node.js (no extra dependency).
+   461	 *
+   462	 * Certificates store their issue instant in UTC. Everything a tenant admin sees or sorts by is
+   463	 * that instant converted to the tenant's IANA time zone, DST rules included.
+   464	 */
+   465	
+   466	const formatters = new Map();
+   467	
+   468	function formatterFor(timeZone) {
+   469	  let formatter = formatters.get(timeZone);
+   470	  if (!formatter) {
+   471	    formatter = new Intl.DateTimeFormat('en-CA', {
+   472	      timeZone,
+   473	      hourCycle: 'h23',
+   474	      year: 'numeric',
+   475	      month: '2-digit',
+   476	      day: '2-digit',
+   477	      hour: '2-digit',
+   478	      minute: '2-digit',
+   479	      second: '2-digit',
+   480	    });
+   481	    formatters.set(timeZone, formatter);
+   482	  }
+   483	  return formatter;
+   484	}
+   485	
+   486	export function isValidTimeZone(timeZone) {
+   487	  try {
+   488	    formatterFor(timeZone);
+   489	    return true;
+   490	  } catch {
+   491	    return false;
+   492	  }
+   493	}
+   494	
+   495	function toDate(instant) {
+   496	  const date = instant instanceof Date ? instant : new Date(instant);
+   497	  if (Number.isNaN(date.getTime())) throw new RangeError(`Invalid timestamp: ${String(instant)}`);
+   498	  return date;
+   499	}
+   500	
+   501	/** Wall-clock fields ({ year, month, day, hour, minute, second } as zero-padded strings). */
+   502	export function zonedParts(instant, timeZone) {
+   503	  const parts = {};
+   504	  for (const part of formatterFor(timeZone).formatToParts(toDate(instant))) {
+   505	    if (part.type !== 'literal') parts[part.type] = part.value;
+   506	  }
+   507	  return parts;
+   508	}
+   509	
+   510	/** Tenant-local calendar date, `YYYY-MM-DD`. */
+   511	export function localDate(instant, timeZone) {
+   512	  const p = zonedParts(instant, timeZone);
+   513	  return `${p.year}-${p.month}-${p.day}`;
+   514	}
+   515	
+   516	/** Tenant-local date and time, `YYYY-MM-DD HH:mm`. */
+   517	export function localDateTime(instant, timeZone) {
+   518	  const p = zonedParts(instant, timeZone);
+   519	  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+   520	}
+   521	
+   522	/** UTC offset in force at that instant, e.g. `+11:00` (Sydney in January) or `+10:00` (Sydney in July). */
+   523	export function utcOffset(instant, timeZone) {
+   524	  const date = toDate(instant);
+   525	  const p = zonedParts(date, timeZone);
+   526	  const wallClockAsUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+   527	  const wholeSeconds = Math.floor(date.getTime() / 1000) * 1000;
+   528	  const minutes = Math.round((wallClockAsUtc - wholeSeconds) / 60_000);
+   529	  const abs = Math.abs(minutes);
+   530	  const pad = (n) => String(n).padStart(2, '0');
+   531	  return `${minutes < 0 ? '-' : '+'}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+   532	}
+   533	
+   534	/**
+   535	 * Returns a memoising `instant -> 'YYYY-MM-DD HH:mm'` function for hot loops (CSV export).
+   536	 * Bulk operations stamp many certificates with the same instant, so the cache hits often.
+   537	 */
+   538	export function createLocalDateTimeFormatter(timeZone, { maxEntries = 50_000 } = {}) {
+   539	  const cache = new Map();
+   540	  return (instant) => {
+   541	    let text = cache.get(instant);
+   542	    if (text === undefined) {
+   543	      text = localDateTime(instant, timeZone);
+   544	      if (cache.size >= maxEntries) cache.clear();
+   545	      cache.set(instant, text);
+   546	    }
+   547	    return text;
+   548	  };
+   549	}
+   550	
+   551	/** Canonical storage format for instants: ISO-8601 UTC with milliseconds (sorts lexicographically). */
+   552	export function toUtcIso(instant) {
+   553	  return toDate(instant).toISOString();
+   554	}
+   555	import path from 'node:path';
+   556	import { fileURLToPath } from 'node:url';
+   557	
+   558	const here = path.dirname(fileURLToPath(import.meta.url));
+   559	
+   560	export const REPO_ROOT = path.resolve(here, '..', '..');
+   561	export const DEFAULT_DB_PATH = path.join(REPO_ROOT, 'data', 'cert-admin.sqlite');
+   562	export const DEFAULT_STATIC_DIR = path.join(REPO_ROOT, 'frontend', 'dist');
+   563	
+   564	/**
+   565	 * Relative paths mean "relative to where the command was typed". npm runs workspace scripts from
+   566	 * the package folder, but records the original directory in INIT_CWD.
+   567	 */
+   568	export function resolveUserPath(value, env = process.env) {
+   569	  return path.resolve(env.INIT_CWD || process.cwd(), value);
+   570	}
+   571	
+   572	/**
+   573	 * Runtime configuration, all optional: PORT, HOST, DB_PATH, STATIC_DIR, LOG_REQUESTS.
+   574	 * (The database layer reads two more settings itself: SQLITE_DRIVER and DB_BUSY_TIMEOUT_MS.)
+   575	 */
+   576	export function loadConfig(env = process.env) {
+   577	  const port = env.PORT === undefined || env.PORT === '' ? 3000 : Number(env.PORT);
+   578	  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+   579	    throw new Error(`PORT must be an integer between 0 and 65535 (got "${env.PORT}")`);
+   580	  }
+   581	  return {
+   582	    port,
+   583	    host: env.HOST || undefined, // undefined = all interfaces
+   584	    dbPath: env.DB_PATH ? resolveUserPath(env.DB_PATH, env) : DEFAULT_DB_PATH,
+   585	    staticDir: env.STATIC_DIR ? resolveUserPath(env.STATIC_DIR, env) : DEFAULT_STATIC_DIR,
+   586	    logRequests: env.LOG_REQUESTS !== '0',
+   587	  };
+   588	}
+   589	/** Opens the database and makes sure it holds the schema and the quick-start demo data. */
+   590	import { migrate } from './db/schema.js';
+   591	import { isSeeded, seedDemoData } from './db/seed.js';
+   592	import { openDatabase } from './db/sqlite.js';
+   593	
+   594	export function openInitializedDatabase(dbPath, { log = () => {} } = {}) {
+   595	  const db = openDatabase(dbPath);
+   596	  try {
+   597	    migrate(db);
+   598	    if (!isSeeded(db) && seedDemoData(db)) log(`Created demo data in ${dbPath}`);
+   599	  } catch (err) {
+   600	    db.close();
+   601	    throw err;
+   602	  }
+   603	  return db;
+   604	}
+   605	/** Entry point: initialise the database (schema + demo data on first run) and serve API + UI. */
+   606	import fs from 'node:fs';
+   607	import http from 'node:http';
+   608	import path from 'node:path';
+   609	
+   610	import { createApp } from './app.js';
+   611	import { openInitializedDatabase } from './bootstrap.js';
+   612	import { loadConfig } from './config.js';
+   613	import { openDatabase } from './db/sqlite.js';
+   614	import { ACTOR_HEADER, listActors } from './services/actors.js';
+   615	
+   616	/** Start-up problems are the operator's to fix: say what is wrong in one line, without a stack trace. */
+   617	function exitWith(message) {
+   618	  console.error(message);
+   619	  process.exit(1);
+   620	}
+   621	
+   622	let config;
+   623	let db;
+   624	try {
+   625	  config = loadConfig();
+   626	} catch (err) {
+   627	  exitWith(err.message);
+   628	}
+   629	try {
+   630	  db = openInitializedDatabase(config.dbPath, { log: console.log });
+   631	} catch (err) {
+   632	  exitWith(`Could not open the database at ${config.dbPath}: ${err.message}`);
+   633	}
+   634	
+   635	const app = createApp({
+   636	  db,
+   637	  openReader: () => openDatabase(config.dbPath, { queryOnly: true }),
+   638	  staticDir: config.staticDir,
+   639	  logRequests: config.logRequests,
+   640	});
+   641	
+   642	// The error handler is attached before listen(): with app.listen() Express would hand a failed
+   643	// bind (port already taken) to the "listening" callback instead.
+   644	const server = http.createServer(app);
+   645	
+   646	server.on('error', (err) => {
+   647	  db.close();
+   648	  if (err.code === 'EADDRINUSE') {
+   649	    exitWith(`Port ${config.port} is already in use. Stop the other process or run with PORT=<free port>.`);
+   650	  }
+   651	  exitWith(`Could not start the HTTP server: ${err.message}`);
+   652	});
+   653	
+   654	server.listen(config.port, config.host, () => {
+   655	  const { port } = server.address();
+   656	  const hasFrontend = fs.existsSync(path.join(config.staticDir, 'index.html'));
+   657	  console.log(`Database: ${config.dbPath} (${db.driver})`);
+   658	  console.log(`Certificate Admin Console listening on http://localhost:${port}`);
+   659	  const actors = listActors(db).map((actor) => `${actor.email} (${actor.tenant.name})`);
+   660	  console.log(`Actors (${ACTOR_HEADER} header): ${actors.join(', ')}`);
+   661	  if (!hasFrontend) console.log('Note: frontend build not found - serving the API only.');
+   662	});
+   663	
+   664	let shuttingDown = false;
+   665	function shutdown(signal) {
+   666	  if (shuttingDown) return;
+   667	  shuttingDown = true;
+   668	  console.log(`\n${signal} received, shutting down`);
+   669	  server.close(() => {
+   670	    db.close();
+   671	    process.exit(0);
+   672	  });
+   673	  server.closeAllConnections?.();
+   674	  setTimeout(() => process.exit(0), 3000).unref();
+   675	}
+   676	process.on('SIGINT', () => shutdown('SIGINT'));
+   677	process.on('SIGTERM', () => shutdown('SIGTERM'));

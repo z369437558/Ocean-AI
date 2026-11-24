@@ -1,0 +1,196 @@
+{
+ "main_session_file": "sessions/61a877e9-483e-575a-b7cf-c5b8e94decb9.jsonl",
+ "main_session": {
+  "lines identical to the tool's file": 3196,
+  "other lines with at least one replacement": 3696,
+  "lines of the unrelated request with their content withheld": 392,
+  "lines": 7284,
+  "line ranges of the unrelated request": [
+   "555-936",
+   "945-953",
+   "993-999",
+   "1001-1067",
+   "1539-1540",
+   "1567-1568",
+   "1573-1574",
+   "1583",
+   "1585",
+   "1592-1593",
+   "1599-1600"
+  ],
+  "passages known only from withheld text (used by the rule for the preparation phase)": 69573
+ },
+ "subagent_runs": [
+  {
+   "run": "wf_2de7e29c-a07",
+   "included": true,
+   "agents": 6
+  },
+  {
+   "run": "wf_34e04759-afc",
+   "included": false,
+   "agents": 4,
+   "sessions": [
+    {
+     "agent": "a81d73c40ad371ffa",
+     "started_at": "2026-11-23T10:32:25.139Z",
+     "ended_at": "2026-11-23T10:56:23.435Z",
+     "model": "[REDACTED: model identifier A]"
+    },
+    {
+     "agent": "ab55f104fd2e8a01c",
+     "started_at": "2026-11-23T10:32:24.601Z",
+     "ended_at": "2026-11-23T10:54:17.100Z",
+     "model": "[REDACTED: model identifier A]"
+    },
+    {
+     "agent": "af2578a026497494e",
+     "started_at": "2026-11-23T10:56:23.593Z",
+     "ended_at": "2026-11-23T10:57:36.043Z",
+     "model": "[REDACTED: model identifier A]"
+    },
+    {
+     "agent": "af36c0a2b582bbe2d",
+     "started_at": "2026-11-23T10:54:17.439Z",
+     "ended_at": "2026-11-23T10:57:54.689Z",
+     "model": "[REDACTED: model identifier A]"
+    }
+   ]
+  },
+  {
+   "run": "wf_36b67f7f-878",
+   "included": true,
+   "agents": 3
+  },
+  {
+   "run": "wf_64f4f895-96e",
+   "included": true,
+   "agents": 3
+  },
+  {
+   "run": "wf_7ccfb441-20f",
+   "included": false,
+   "agents": 2,
+   "sessions": [
+    {
+     "agent": "a6ea3a6101e296da1",
+     "started_at": "2026-11-23T12:20:26.002Z",
+     "ended_at": "2026-11-23T12:30:01.477Z",
+     "model": "[REDACTED: model identifier A]"
+    },
+    {
+     "agent": "af93069deac823556",
+     "started_at": "2026-11-23T12:20:23.096Z",
+     "ended_at": "2026-11-23T12:27:53.573Z",
+     "model": "[REDACTED: model identifier A]"
+    }
+   ]
+  },
+  {
+   "run": "wf_956299a7-a24",
+   "included": true,
+   "agents": 9
+  },
+  {
+   "run": "wf_9ebd21af-0fe",
+   "included": true,
+   "agents": 3
+  },
+  {
+   "run": "wf_be7a6b64-0c4",
+   "included": true,
+   "agents": 2
+  },
+  {
+   "run": "wf_c39bd866-324",
+   "included": true,
+   "agents": 4
+  },
+  {
+   "run": "wf_c7cfad2a-83b",
+   "included": true,
+   "agents": 5
+  },
+  {
+   "run": "wf_ce880d66-b3c",
+   "included": true,
+   "agents": 6
+  },
+  {
+   "run": "wf_cf2a82ec-f18",
+   "included": true,
+   "agents": 5
+  },
+  {
+   "run": "wf_e4b5cf66-7b5",
+   "included": true,
+   "agents": 8
+  }
+ ],
+ "persisted_outputs_copied": [
+  "b042kk6u7.txt",
+  "b2gdbas1k.txt",
+  "b3ha5lx8a.txt",
+  "b4cmrh9dd.txt",
+  "b4yzcmnvy.txt",
+  "b59373t47.txt",
+  "b5csvwkgw.txt",
+  "b5mkv6kzv.txt",
+  "b5q73ctba.txt",
+  "b6mxjxnuv.txt",
+  "b9c0gp6ia.txt",
+  "bfkc9mmct.txt",
+  "bl222inze.txt",
+  "boo8jlevi.txt",
+  "bqo7vq1q1.txt",
+  "branbuchg.txt",
+  "brpfu07s0.txt",
+  "bsf9ycsp1.txt",
+  "bu59xgu37.txt",
+  "bx0qx0jt1.txt",
+  "bxe1mq5n4.txt"
+ ],
+ "replacements_by_reason": {
+  "[REDACTED: model identifier A]": 22821,
+  "[REDACTED: model identifier B]": 8795,
+  "[REDACTED: opaque signature of a reasoning block]": 4439,
+  "[REDACTED: working step of a session that reviewed this export and was given its files, the withheld material included]": 2867,
+  "[REDACTED: reminder or instruction text of the AI tool (vendor material)]": 1545,
+  "[REDACTED: unrelated private request handled in the same session - third-party business documents]": 1205,
+  "[REDACTED: catalogue of tools and connectors available in the account (account configuration)]": 657,
+  "[REDACTED: directory of the unrelated request]": 651,
+  "[REDACTED: line that refers to the unrelated private request]": 250,
+  "[REDACTED: tool name of the unrelated request]": 145,
+  "[REDACTED: catalogue of skills available in the account (account configuration)]": 122,
+  "[REDACTED: built-in system prompt and tool definitions of the AI tool (vendor material)]": 117,
+  "[REDACTED: instructions of the connectors available in the account (account configuration)]": 112,
+  "[REDACTED: text shown while this export was prepared that repeats words of the unrelated private request]": 71,
+  "[REDACTED: binary data (base64)]": 66,
+  "[REDACTED: account identifier]": 65,
+  "[REDACTED: tool output that shows material of the unrelated private request]": 64,
+  "[REDACTED: result of a review of this export: it describes the withheld material to say where traces of it were found]": 55,
+  "[REDACTED: e-mail address of the assignment's reviewer]": 48,
+  "[REDACTED: command of the preparation of this export that handled its private terms]": 42,
+  "[REDACTED: output of a command that handled the private terms of this export]": 42,
+  "[REDACTED: name of the company that set the assignment]": 28,
+  "[REDACTED: domain of the candidate's e-mail address]": 20,
+  "[REDACTED: name of the assignment's reviewer]": 18,
+  "[REDACTED: catalogue of agent types of the AI tool (vendor material)]": 14,
+  "[REDACTED: encoded data inside a text, such as a script in a process listing of the container (not conversation content)]": 14,
+  "[REDACTED: bundled reference text of the AI tool (vendor material)]": 12,
+  "[REDACTED: job name of the unrelated request]": 12,
+  "[REDACTED: definitions of tools of the AI tool (vendor material)]": 8,
+  "[REDACTED: name of an organisation of the candidate's account]": 7,
+  "[REDACTED: tool output that prints part of a result of a review of this export]": 6,
+  "[REDACTED: notice of the tool about background work of the unrelated private request]": 4,
+  "[REDACTED: session record of the AI tool with account and usage data (account configuration)]": 4,
+  "[REDACTED: file of the unrelated request]": 4,
+  "[REDACTED: list of the candidate's other repositories - unrelated to this assignment]": 4,
+  "[REDACTED: private term]": 4,
+  "[REDACTED: documentation page of the AI tool (vendor material)]": 3,
+  "[REDACTED: another repository of the candidate]": 2,
+  "[REDACTED: model identifier C]": 2,
+  "[REDACTED: model identifier D]": 2,
+  "[REDACTED: model identifier E]": 2
+ }
+}

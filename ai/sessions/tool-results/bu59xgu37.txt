@@ -1,0 +1,589 @@
+     1	import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
+     2	import { describe, expect, it, vi } from 'vitest';
+     3	
+     4	import { loadedRows, openConsole, serials, settle, tableRows } from './support/app.jsx';
+     5	import { ALICE, BOB, deferred, internalError, networkError, recorded, startFakeServer } from './support/fakeServer.js';
+     6	
+     7	const listRequests = (server) => server.sent('GET', '/api/certificates');
+     8	const lastListRequest = (server) => listRequests(server).at(-1);
+     9	const columnHeader = (name) => screen.getByRole('button', { name }).closest('th');
+    10	// The "Issued" header also names the time zone; matched by its first word, because DOM emulations
+    11	// disagree on the space in front of the zone when they compute the accessible name.
+    12	const ISSUED = /^Issued/;
+    13	
+    14	describe('Certificate list', () => {
+    15	  it('shows a loading state, then the certificates of the acting tenant', async () => {
+    16	    const server = startFakeServer();
+    17	    const gate = deferred();
+    18	    server.once('GET', '/api/certificates', async (_request, respond) => {
+    19	      await gate.promise;
+    20	      return respond();
+    21	    });
+    22	    openConsole({ server });
+    23	    expect(screen.getByText('Loading console…')).toBeTruthy();
+    24	
+    25	    const loading = await screen.findByTestId('list-loading');
+    26	    expect(loading.textContent).toBe('Loading certificates…');
+    27	    const list = screen.getByTestId('certificate-list');
+    28	    expect(list.getAttribute('data-state')).toBe('loading');
+    29	    expect(list.getAttribute('aria-busy')).toBe('true');
+    30	    expect(screen.queryByRole('navigation', { name: 'Pagination' })).toBeNull();
+    31	
+    32	    gate.resolve();
+    33	    const rows = await loadedRows();
+    34	    expect(screen.queryByTestId('list-loading')).toBeNull();
+    35	    expect(list.getAttribute('aria-busy')).toBe('false');
+    36	    // newest first, issue dates in the tenant's time zone
+    37	    expect(rows).toEqual([
+    38	      ['EAST-0000007', 'Tom Walker', 'Forklift Operations', '2026-10-04 03:30', 'Active'],
+    39	      ['EAST-0000006', "Marcus O'Connor", 'Forklift Operations', '2026-10-04 01:30', 'Active'],
+    40	      ['EAST-0000005', 'Priya Sharma', 'Forklift Operations', '2026-06-15 12:00', 'Active'],
+    41	      ['EAST-0000004', 'José Álvarez', 'First Aid Refresher', '2026-04-05 02:30', 'Active'],
+    42	      ['EAST-0000003', 'Sofia Rossi', 'First Aid Refresher', '2026-04-05 02:30', 'Active'],
+    43	      ['EAST-0000002', 'Mei Chen', 'First Aid Refresher', '2026-02-15 09:15', 'Revoked'],
+    44	      ['EAST-0000001', 'Alex Lee', 'Safety 101', '2026-01-11 00:30', 'Active'],
+    45	    ]);
+    46	    expect(screen.getByTestId('tenant-name').textContent).toBe('East');
+    47	    expect(screen.getByText('1–7 of 7 certificates')).toBeTruthy();
+    48	    expect(document.title).toBe('Certificates · East');
+    49	
+    50	    expect(listRequests(server)).toHaveLength(1);
+    51	    expect(lastListRequest(server).actor).toBe(ALICE);
+    52	    expect(lastListRequest(server).query).toEqual({ status: 'all', sort: 'issued', order: 'desc', page: '1', pageSize: '25' });
+    53	  });
+    54	
+    55	  it('shows the empty state of a tenant without certificates', async () => {
+    56	    const server = startFakeServer();
+    57	    server.tenant(ALICE).certificates = [];
+    58	    openConsole({ server });
+    59	
+    60	    expect(await loadedRows()).toEqual([]);
+    61	    expect(screen.getByText('No certificates yet')).toBeTruthy();
+    62	    expect(screen.getByText('Certificates appear here once they have been issued for a course.')).toBeTruthy();
+    63	    expect(screen.getByRole('link', { name: 'Go to bulk issue' }).getAttribute('href')).toBe('#/bulk-issue');
+    64	    expect(screen.getByText('No certificates')).toBeTruthy();
+    65	  });
+    66	
+    67	  it('shows the empty state of a search without matches and can clear the filters', async () => {
+    68	    const { server, user } = openConsole();
+    69	    await loadedRows();
+    70	
+    71	    await user.type(screen.getByTestId('search-input'), 'zzz{Enter}');
+    72	    expect(await loadedRows()).toEqual([]);
+    73	    expect(screen.getByText('No certificates match your search')).toBeTruthy();
+    74	    expect(screen.getByText('Nothing found for “zzz”. Search looks at learner names and serial numbers.')).toBeTruthy();
+    75	
+    76	    await user.selectOptions(screen.getByTestId('status-filter'), 'revoked');
+    77	    await loadedRows();
+    78	    expect(screen.getByText('Nothing found for “zzz” with status revoked. Search looks at learner names and serial numbers.')).toBeTruthy();
+    79	
+    80	    await user.click(screen.getByRole('button', { name: 'Clear search and filters' }));
+    81	    expect(await loadedRows()).toHaveLength(7);
+    82	    expect(screen.getByTestId('search-input').value).toBe('');
+    83	    expect(screen.getByTestId('status-filter').value).toBe('all');
+    84	    expect(lastListRequest(server).query).toEqual({ status: 'all', sort: 'issued', order: 'desc', page: '1', pageSize: '25' });
+    85	  });
+    86	
+    87	  it('shows the error state for a failed request and loads again on "Try again"', async () => {
+    88	    const server = startFakeServer();
+    89	    server.once('GET', '/api/certificates', () => internalError());
+    90	    const { user } = openConsole({ server });
+    91	
+    92	    const alert = await screen.findByRole('alert');
+    93	    expect(alert.textContent).toContain('Certificates could not be loaded');
+    94	    expect(alert.textContent).toContain('Unexpected server error');
+    95	    expect(alert.textContent).toContain('HTTP 500 · internal_error');
+    96	    expect(screen.getByTestId('certificate-list').getAttribute('data-state')).toBe('error');
+    97	    expect(screen.queryByRole('navigation', { name: 'Pagination' })).toBeNull();
+    98	
+    99	    await user.click(within(alert).getByRole('button', { name: 'Try again' }));
+   100	    expect(await loadedRows()).toHaveLength(7);
+   101	    expect(screen.queryByRole('alert')).toBeNull();
+   102	    expect(listRequests(server)).toHaveLength(2);
+   103	  });
+   104	
+   105	  it('drops the rows on screen when a reload fails, and recovers', async () => {
+   106	    const { server, user } = openConsole();
+   107	    await loadedRows();
+   108	
+   109	    server.once('GET', '/api/certificates', () => {
+   110	      throw networkError();
+   111	    });
+   112	    await user.selectOptions(screen.getByTestId('status-filter'), 'active');
+   113	    const alert = await screen.findByRole('alert');
+   114	    expect(alert.textContent).toContain('The server could not be reached. Check that it is running, then try again.');
+   115	    expect(screen.queryByText('EAST-0000007')).toBeNull();
+   116	
+   117	    await user.click(within(alert).getByRole('button', { name: 'Try again' }));
+   118	    expect(await loadedRows()).toHaveLength(6);
+   119	    expect(lastListRequest(server).query.status).toBe('active');
+   120	  });
+   121	
+   122	  it('searches 300 ms after the last keystroke, with a single request', async () => {
+   123	    const { server } = openConsole();
+   124	    await loadedRows();
+   125	    const input = screen.getByTestId('search-input');
+   126	
+   127	    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+   128	    fireEvent.change(input, { target: { value: 'pri' } });
+   129	    act(() => vi.advanceTimersByTime(200));
+   130	    fireEvent.change(input, { target: { value: 'priya ' } }); // every keystroke restarts the wait
+   131	    act(() => vi.advanceTimersByTime(299));
+   132	    expect(listRequests(server)).toHaveLength(1); // nothing but the initial load so far
+   133	
+   134	    act(() => vi.advanceTimersByTime(1));
+   135	    expect(listRequests(server)).toHaveLength(2);
+   136	    expect(lastListRequest(server).query).toEqual({ q: 'priya', status: 'all', sort: 'issued', order: 'desc', page: '1', pageSize: '25' });
+   137	    vi.useRealTimers();
+   138	
+   139	    expect(await loadedRows()).toEqual([['EAST-0000005', 'Priya Sharma', 'Forklift Operations', '2026-06-15 12:00', 'Active']]);
+   140	    expect(screen.getByText('1–1 of 1 certificates')).toBeTruthy();
+   141	  });
+   142	
+   143	  it('searches at once on Enter and does not repeat the request when the debounce fires', async () => {
+   144	    const { server } = openConsole();
+   145	    await loadedRows();
+   146	    const input = screen.getByTestId('search-input');
+   147	
+   148	    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+   149	    fireEvent.change(input, { target: { value: 'EAST-0000003' } });
+   150	    fireEvent.submit(input.closest('form'));
+   151	    expect(listRequests(server)).toHaveLength(2);
+   152	    expect(lastListRequest(server).query.q).toBe('EAST-0000003');
+   153	
+   154	    act(() => vi.advanceTimersByTime(1000));
+   155	    expect(listRequests(server)).toHaveLength(2);
+   156	    vi.useRealTimers();
+   157	
+   158	    expect(serials(await loadedRows())).toEqual(['EAST-0000003']); // found by serial number
+   159	  });
+   160	
+   161	  it('filters by status', async () => {
+   162	    const { server, user } = openConsole();
+   163	    await loadedRows();
+   164	
+   165	    await user.selectOptions(screen.getByTestId('status-filter'), 'revoked');
+   166	    expect(await loadedRows()).toEqual([['EAST-0000002', 'Mei Chen', 'First Aid Refresher', '2026-02-15 09:15', 'Revoked']]);
+   167	    expect(lastListRequest(server).query).toEqual({ status: 'revoked', sort: 'issued', order: 'desc', page: '1', pageSize: '25' });
+   168	
+   169	    await user.selectOptions(screen.getByTestId('status-filter'), 'active');
+   170	    expect(serials(await loadedRows())).not.toContain('EAST-0000002');
+   171	    expect(lastListRequest(server).query.status).toBe('active');
+   172	  });
+   173	
+   174	  it('sorts by a column header and toggles the order on the second click', async () => {
+   175	    const { server, user } = openConsole();
+   176	    await loadedRows();
+   177	    expect(columnHeader(ISSUED).getAttribute('aria-sort')).toBe('descending');
+   178	    expect(columnHeader(ISSUED).textContent).toContain('Issued (Australia/Sydney)');
+   179	    expect(columnHeader('Learner').getAttribute('aria-sort')).toBe('none');
+   180	
+   181	    await user.click(screen.getByRole('button', { name: 'Learner' }));
+   182	    expect((await loadedRows()).map((cells) => cells[1])).toEqual([
+   183	      'Alex Lee',
+   184	      'José Álvarez',
+   185	      "Marcus O'Connor",
+   186	      'Mei Chen',
+   187	      'Priya Sharma',
+   188	      'Sofia Rossi',
+   189	      'Tom Walker',
+   190	    ]);
+   191	    expect(lastListRequest(server).query).toMatchObject({ sort: 'learner', order: 'asc', page: '1' });
+   192	    expect(columnHeader('Learner').getAttribute('aria-sort')).toBe('ascending');
+   193	    expect(columnHeader(ISSUED).getAttribute('aria-sort')).toBe('none');
+   194	    expect(screen.getByTestId('sort-select').value).toBe('learner:asc');
+   195	
+   196	    await user.click(screen.getByRole('button', { name: 'Learner' }));
+   197	    expect((await loadedRows())[0][1]).toBe('Tom Walker');
+   198	    expect(lastListRequest(server).query).toMatchObject({ sort: 'learner', order: 'desc' });
+   199	    expect(columnHeader('Learner').getAttribute('aria-sort')).toBe('descending');
+   200	    expect(screen.getByTestId('sort-select').value).toBe('learner:desc');
+   201	
+   202	    // another column starts in its own default order
+   203	    await user.click(screen.getByRole('button', { name: ISSUED }));
+   204	    await loadedRows();
+   205	    expect(lastListRequest(server).query).toMatchObject({ sort: 'issued', order: 'desc' });
+   206	  });
+   207	
+   208	  it('sorts through the "Sort by" menu and keeps the column headers in sync', async () => {
+   209	    const { server, user } = openConsole();
+   210	    await loadedRows();
+   211	
+   212	    await user.selectOptions(screen.getByTestId('sort-select'), 'serial:asc');
+   213	    expect(serials(await loadedRows())).toEqual(recorded.tenants[ALICE].certificates.map((certificate) => certificate.serialNumber));
+   214	    expect(lastListRequest(server).query).toMatchObject({ sort: 'serial', order: 'asc' });
+   215	    expect(columnHeader('Serial number').getAttribute('aria-sort')).toBe('ascending');
+   216	
+   217	    await user.selectOptions(screen.getByTestId('sort-select'), 'status:desc');
+   218	    expect((await loadedRows())[0][4]).toBe('Revoked');
+   219	    expect(lastListRequest(server).query).toMatchObject({ sort: 'status', order: 'desc' });
+   220	    expect(columnHeader('Status').getAttribute('aria-sort')).toBe('descending');
+   221	
+   222	    // a header click continues from what the menu selected
+   223	    await user.click(screen.getByRole('button', { name: 'Status' }));
+   224	    await loadedRows();
+   225	    expect(lastListRequest(server).query).toMatchObject({ sort: 'status', order: 'asc' });
+   226	  });
+   227	
+   228	  it('pages through the results', async () => {
+   229	    const server = startFakeServer();
+   230	    server.tenant(ALICE).certificates = recorded.manyCertificates.items; // 29 certificates
+   231	    const { user } = openConsole({ server });
+   232	    const pagination = () => screen.getByRole('navigation', { name: 'Pagination' });
+   233	    const button = (name) => within(pagination()).getByRole('button', { name });
+   234	
+   235	    expect(await loadedRows()).toHaveLength(25);
+   236	    expect(pagination().textContent).toContain('1–25 of 29 certificates');
+   237	    expect(pagination().textContent).toContain('Page 1 of 2');
+   238	
+   239	    await user.selectOptions(screen.getByTestId('page-size'), '10');
+   240	    const firstPage = serials(await loadedRows());
+   241	    expect(firstPage).toHaveLength(10);
+   242	    expect(lastListRequest(server).query).toMatchObject({ page: '1', pageSize: '10' });
+   243	    expect(pagination().textContent).toContain('1–10 of 29 certificates');
+   244	    expect(pagination().textContent).toContain('Page 1 of 3');
+   245	    expect(button('« First').disabled).toBe(true);
+   246	    expect(button('‹ Previous').disabled).toBe(true);
+   247	    expect(button('Next ›').disabled).toBe(false);
+   248	
+   249	    await user.click(button('Next ›'));
+   250	    const secondPage = serials(await loadedRows());
+   251	    expect(lastListRequest(server).query).toMatchObject({ page: '2', pageSize: '10' });
+   252	    expect(pagination().textContent).toContain('11–20 of 29 certificates');
+   253	    expect(secondPage.filter((serial) => firstPage.includes(serial))).toEqual([]);
+   254	
+   255	    await user.click(button('Last »'));
+   256	    expect(await loadedRows()).toHaveLength(9);
+   257	    expect(lastListRequest(server).query.page).toBe('3');
+   258	    expect(pagination().textContent).toContain('21–29 of 29 certificates');
+   259	    expect(pagination().textContent).toContain('Page 3 of 3');
+   260	    expect(button('Next ›').disabled).toBe(true);
+   261	    expect(button('Last »').disabled).toBe(true);
+   262	
+   263	    await user.click(button('‹ Previous'));
+   264	    expect(serials(await loadedRows())).toEqual(secondPage);
+   265	    await user.click(button('« First'));
+   266	    expect(serials(await loadedRows())).toEqual(firstPage);
+   267	    expect(lastListRequest(server).query.page).toBe('1');
+   268	  });
+   269	
+   270	  it('starts over at page 1 when the filter or the sort order changes', async () => {
+   271	    const server = startFakeServer();
+   272	    server.tenant(ALICE).certificates = recorded.manyCertificates.items;
+   273	    const { user } = openConsole({ server });
+   274	    await loadedRows();
+   275	    await user.selectOptions(screen.getByTestId('page-size'), '10');
+   276	    await loadedRows();
+   277	    await user.click(screen.getByRole('button', { name: 'Next ›' }));
+   278	    await loadedRows();
+   279	    expect(lastListRequest(server).query.page).toBe('2');
+   280	
+   281	    const before = listRequests(server).length;
+   282	    await user.selectOptions(screen.getByTestId('status-filter'), 'active');
+   283	    await loadedRows();
+   284	    // one request, for page 1 of the new result set - never page 2 of it
+   285	    expect(listRequests(server).slice(before).map((request) => request.query)).toEqual([
+   286	      { status: 'active', sort: 'issued', order: 'desc', page: '1', pageSize: '10' },
+   287	    ]);
+   288	    expect(screen.getByRole('navigation', { name: 'Pagination' }).textContent).toContain('Page 1 of 3');
+   289	
+   290	    await user.click(screen.getByRole('button', { name: 'Next ›' }));
+   291	    await loadedRows();
+   292	    await user.click(screen.getByRole('button', { name: 'Course' }));
+   293	    await loadedRows();
+   294	    expect(lastListRequest(server).query).toMatchObject({ sort: 'course', order: 'asc', page: '1' });
+   295	  });
+   296	
+   297	  it('switches the actor: other X-Actor-Email, other tenant, none of the previous rows', async () => {
+   298	    const { server, user } = openConsole();
+   299	    expect(serials(await loadedRows()).every((serial) => serial.startsWith('EAST-'))).toBe(true);
+   300	    expect(screen.getByTestId('actor-select').value).toBe(ALICE);
+   301	
+   302	    const before = server.requests.length;
+   303	    await user.selectOptions(screen.getByTestId('actor-select'), BOB);
+   304	    expect(await loadedRows()).toEqual([
+   305	      ['WEST-0000004', 'Emily Davis', 'Manual Handling', '2026-09-12 18:20', 'Active'],
+   306	      ['WEST-0000003', 'Grace Kim', 'Working at Heights', '2026-08-01 11:00', 'Revoked'],
+   307	      ['WEST-0000002', 'Liam Brown', 'Working at Heights', '2026-03-21 01:45', 'Active'],
+   308	      ['WEST-0000001', 'Alex Lee', 'Safety 101', '2026-01-10 21:30', 'Active'],
+   309	    ]);
+   310	    expect(document.body.textContent).not.toContain('EAST-');
+   311	    expect(server.requests.slice(before).map((request) => request.actor)).toEqual([BOB]);
+   312	    expect(screen.getByTestId('tenant-name').textContent).toBe('West');
+   313	    expect(columnHeader(ISSUED).textContent).toContain('Issued (Australia/Perth)'); // the issue dates are Perth time now
+   314	    expect(document.title).toBe('Certificates · West');
+   315	    expect(window.localStorage.getItem('cert-admin.actor')).toBe(BOB); // remembered for the next visit
+   316	  });
+   317	
+   318	  it('starts the other tenant with a fresh page: search, filters and paging do not carry over', async () => {
+   319	    const { server, user } = openConsole();
+   320	    await loadedRows();
+   321	    await user.type(screen.getByTestId('search-input'), 'alex{Enter}');
+   322	    await user.selectOptions(screen.getByTestId('status-filter'), 'active');
+   323	    await loadedRows();
+   324	
+   325	    await user.selectOptions(screen.getByTestId('actor-select'), BOB);
+   326	    expect(await loadedRows()).toHaveLength(4);
+   327	    expect(screen.getByTestId('search-input').value).toBe('');
+   328	    expect(lastListRequest(server).query).toEqual({ status: 'all', sort: 'issued', order: 'desc', page: '1', pageSize: '25' });
+   329	  });
+   330	
+   331	  it("never shows the previous tenant's rows, also when its slow answer arrives after the switch", async () => {
+   332	    const server = startFakeServer();
+   333	    const gate = deferred();
+   334	    server.once('GET', '/api/certificates', async (_request, respond) => {
+   335	      await gate.promise; // Alice's list is still on its way ...
+   336	      return respond();
+   337	    });
+   338	    const { user } = openConsole({ server });
+   339	    await screen.findByTestId('list-loading');
+   340	
+   341	    await user.selectOptions(screen.getByTestId('actor-select'), BOB); // ... when the admin switches
+   342	    expect(serials(await loadedRows())).toEqual(['WEST-0000004', 'WEST-0000003', 'WEST-0000002', 'WEST-0000001']);
+   343	
+   344	    gate.resolve();
+   345	    await settle();
+   346	    expect(serials(await loadedRows())).toEqual(['WEST-0000004', 'WEST-0000003', 'WEST-0000002', 'WEST-0000001']);
+   347	    expect(document.body.textContent).not.toContain('EAST-');
+   348	    expect(listRequests(server).map((request) => [request.actor, request.aborted])).toEqual([
+   349	      [ALICE, true],
+   350	      [BOB, false],
+   351	    ]);
+   352	  });
+   353	
+   354	  it('falls back to the first admin when the remembered one is unknown', async () => {
+   355	    openConsole({ actor: 'nobody@nowhere.test' });
+   356	    expect(serials(await loadedRows())[0]).toBe('EAST-0000007');
+   357	    expect(screen.getByTestId('actor-select').value).toBe(ALICE);
+   358	  });
+   359	
+   360	  it('reports a failed start-up and retries', async () => {
+   361	    const server = startFakeServer();
+   362	    server.once('GET', '/api/actors', () => {
+   363	      throw networkError();
+   364	    });
+   365	    const { user } = openConsole({ server });
+   366	
+   367	    const alert = await screen.findByRole('alert');
+   368	    expect(alert.textContent).toContain('The console could not start');
+   369	    await user.click(within(alert).getByRole('button', { name: 'Try again' }));
+   370	    expect(await loadedRows()).toHaveLength(7);
+   371	  });
+   372	
+   373	  it('steps back to the last existing page when the rows of the current page have disappeared', async () => {
+   374	    const server = startFakeServer();
+   375	    server.tenant(ALICE).certificates = recorded.manyCertificates.items; // 29: page 2 of 2 holds four
+   376	    const { user } = openConsole({ server });
+   377	    await loadedRows();
+   378	
+   379	    server.once('GET', '/api/certificates', () => internalError());
+   380	    await user.click(screen.getByRole('button', { name: 'Next ›' }));
+   381	    const alert = await screen.findByRole('alert');
+   382	
+   383	    server.tenant(ALICE).certificates = recorded.manyCertificates.items.slice(0, 20); // meanwhile only 20 are left
+   384	    await user.click(within(alert).getByRole('button', { name: 'Try again' }));
+   385	    // page 2 comes back empty, the list asks for page 1 on its own and shows it
+   386	    await waitFor(() => expect(tableRows(screen.getByTestId('certificate-list'))).toHaveLength(20));
+   387	    expect(screen.getByRole('navigation', { name: 'Pagination' }).textContent).toContain('Page 1 of 1');
+   388	    expect(listRequests(server).map((request) => request.query.page)).toEqual(['1', '2', '2', '1']);
+   389	  });
+   390	});
+   391	import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
+   392	import { describe, expect, it, vi } from 'vitest';
+   393	
+   394	import { captureDownloads, loadedRows, openConsole } from './support/app.jsx';
+   395	import { ALICE, BOB, deferred, internalError, networkError, recorded, startFakeServer } from './support/fakeServer.js';
+   396	
+   397	const exportRequests = (server) => server.sent('GET', '/api/certificates/export.csv');
+   398	const lastListQuery = (server) => server.sent('GET', '/api/certificates').at(-1).query;
+   399	const eastFile = /filename="([^"]+)"/.exec(recorded.tenants[ALICE].exportCsv.contentDisposition)[1];
+   400	const eastBytes = new TextEncoder().encode(recorded.tenants[ALICE].exportCsv.body).length;
+   401	
+   402	describe('CSV export', () => {
+   403	  it('downloads the file for the default view and reports it', async () => {
+   404	    const saved = captureDownloads();
+   405	    const { server, user } = openConsole();
+   406	    await loadedRows();
+   407	
+   408	    await user.click(screen.getByTestId('export-button'));
+   409	    const done = await screen.findByTestId('export-done');
+   410	    expect(done.textContent).toBe(`Export saved as ${eastFile} (${eastBytes} B). Dismiss`);
+   411	
+   412	    expect(exportRequests(server)).toHaveLength(1);
+   413	    expect(exportRequests(server)[0].actor).toBe(ALICE);
+   414	    expect(exportRequests(server)[0].query).toEqual({ status: 'all', sort: 'issued', order: 'desc' });
+   415	    expect(saved).toHaveLength(1);
+   416	    expect(saved[0].fileName).toBe(eastFile); // the name the server chose (Content-Disposition)
+   417	    expect(await saved[0].blob.text()).toBe(recorded.tenants[ALICE].exportCsv.body);
+   418	
+   419	    await user.click(within(done).getByRole('button', { name: 'Dismiss' }));
+   420	    expect(screen.queryByTestId('export-done')).toBeNull();
+   421	  });
+   422	
+   423	  it('carries exactly the active search, status filter, sort column and order', async () => {
+   424	    const saved = captureDownloads();
+   425	    const { server, user } = openConsole();
+   426	    await loadedRows();
+   427	
+   428	    await user.type(screen.getByTestId('search-input'), 'lee{Enter}');
+   429	    await user.selectOptions(screen.getByTestId('status-filter'), 'active');
+   430	    await user.click(screen.getByRole('button', { name: 'Learner' }));
+   431	    await user.click(screen.getByRole('button', { name: 'Learner' })); // second click: descending
+   432	    await loadedRows();
+   433	
+   434	    await user.click(screen.getByTestId('export-button'));
+   435	    await screen.findByTestId('export-done');
+   436	
+   437	    const exported = exportRequests(server)[0].query;
+   438	    expect(exported).toEqual({ q: 'lee', status: 'active', sort: 'learner', order: 'desc' });
+   439	    // the same filter and order as the rows on screen, minus the paging
+   440	    const { page, pageSize, ...shown } = lastListQuery(server);
+   441	    expect(exported).toEqual(shown);
+   442	    expect(saved).toHaveLength(1);
+   443	  });
+   444	
+   445	  it('exports the sort order chosen in the "Sort by" menu', async () => {
+   446	    captureDownloads();
+   447	    const { server, user } = openConsole();
+   448	    await loadedRows();
+   449	    await user.selectOptions(screen.getByTestId('sort-select'), 'issued:asc');
+   450	    await loadedRows();
+   451	
+   452	    await user.click(screen.getByTestId('export-button'));
+   453	    await screen.findByTestId('export-done');
+   454	    expect(exportRequests(server)[0].query).toEqual({ status: 'all', sort: 'issued', order: 'asc' });
+   455	  });
+   456	
+   457	  it('uses the text in the search box even when Export is clicked before the search debounce has fired', async () => {
+   458	    const saved = captureDownloads();
+   459	    const { server } = openConsole();
+   460	    await loadedRows();
+   461	    const listRequestsBefore = server.sent('GET', '/api/certificates').length;
+   462	
+   463	    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+   464	    fireEvent.change(screen.getByTestId('search-input'), { target: { value: ' walker ' } });
+   465	    fireEvent.click(screen.getByTestId('export-button')); // no time has passed: the list has not searched yet
+   466	
+   467	    expect(exportRequests(server)).toHaveLength(1);
+   468	    expect(exportRequests(server)[0].query).toEqual({ q: 'walker', status: 'all', sort: 'issued', order: 'desc' });
+   469	    // ... and the table switches to the exported search at once, so file and screen agree
+   470	    expect(server.sent('GET', '/api/certificates')).toHaveLength(listRequestsBefore + 1);
+   471	    expect(lastListQuery(server).q).toBe('walker');
+   472	
+   473	    act(() => vi.advanceTimersByTime(1000)); // the debounce firing later changes nothing
+   474	    expect(server.sent('GET', '/api/certificates')).toHaveLength(listRequestsBefore + 1);
+   475	    vi.useRealTimers();
+   476	
+   477	    await screen.findByTestId('export-done');
+   478	    expect(await loadedRows()).toEqual([['EAST-0000007', 'Tom Walker', 'Forklift Operations', '2026-10-04 03:30', 'Active']]);
+   479	    expect(saved).toHaveLength(1);
+   480	  });
+   481	
+   482	  it('shows that an export is running and locks the button meanwhile', async () => {
+   483	    const saved = captureDownloads();
+   484	    const server = startFakeServer();
+   485	    const gate = deferred();
+   486	    server.once('GET', '/api/certificates/export.csv', async (_request, respond) => {
+   487	      await gate.promise;
+   488	      return respond();
+   489	    });
+   490	    const { user } = openConsole({ server });
+   491	    await loadedRows();
+   492	
+   493	    const button = screen.getByTestId('export-button');
+   494	    await user.click(button);
+   495	    expect(button.disabled).toBe(true);
+   496	    expect(button.textContent).toBe('Exporting…');
+   497	    expect(screen.getByText(/^Preparing the export for the current search and sort order\./).textContent).toContain(
+   498	      'Leaving this page cancels the export.',
+   499	    );
+   500	    expect(saved).toEqual([]);
+   501	
+   502	    gate.resolve();
+   503	    await screen.findByTestId('export-done');
+   504	    expect(button.disabled).toBe(false);
+   505	    expect(button.textContent).toBe('Export CSV');
+   506	    expect(saved).toHaveLength(1);
+   507	  });
+   508	
+   509	  it('sends one request for a double click', async () => {
+   510	    const saved = captureDownloads();
+   511	    const server = startFakeServer();
+   512	    const gate = deferred();
+   513	    server.on('GET', '/api/certificates/export.csv', async (_request, respond) => {
+   514	      await gate.promise; // the second click lands while the first export is still running
+   515	      return respond();
+   516	    });
+   517	    const { user } = openConsole({ server });
+   518	    await loadedRows();
+   519	
+   520	    await user.dblClick(screen.getByTestId('export-button'));
+   521	    fireEvent.click(screen.getByTestId('export-button')); // and one more for good measure
+   522	    gate.resolve();
+   523	    await screen.findByTestId('export-done');
+   524	    expect(exportRequests(server)).toHaveLength(1);
+   525	    expect(saved).toHaveLength(1);
+   526	  });
+   527	
+   528	  it('reports a failed export and retries it with the same filters', async () => {
+   529	    const saved = captureDownloads();
+   530	    const { server, user } = openConsole();
+   531	    await loadedRows();
+   532	    await user.selectOptions(screen.getByTestId('status-filter'), 'revoked');
+   533	    await loadedRows();
+   534	
+   535	    server.once('GET', '/api/certificates/export.csv', () => internalError());
+   536	    await user.click(screen.getByTestId('export-button'));
+   537	    const alert = await screen.findByRole('alert');
+   538	    expect(alert.textContent).toBe('Export failed: Unexpected server error Try again');
+   539	    expect(saved).toEqual([]);
+   540	    expect(screen.getByTestId('export-button').disabled).toBe(false);
+   541	    expect(await loadedRows()).toHaveLength(1); // the list is not affected by the failed export
+   542	
+   543	    server.once('GET', '/api/certificates/export.csv', () => {
+   544	      throw networkError();
+   545	    });
+   546	    await user.click(within(alert).getByRole('button', { name: 'Try again' }));
+   547	    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Export failed: The server could not be reached.'));
+   548	    expect(saved).toEqual([]);
+   549	
+   550	    await user.click(within(screen.getByRole('alert')).getByRole('button', { name: 'Try again' }));
+   551	    await screen.findByTestId('export-done');
+   552	    expect(screen.queryByRole('alert')).toBeNull();
+   553	    expect(saved).toHaveLength(1);
+   554	    expect(exportRequests(server).map((request) => request.query)).toEqual(Array(3).fill({ status: 'revoked', sort: 'issued', order: 'desc' }));
+   555	  });
+   556	
+   557	  it('reports a download that breaks off half-way as failed and saves nothing', async () => {
+   558	    const saved = captureDownloads();
+   559	    const server = startFakeServer();
+   560	    const { user } = openConsole({ server });
+   561	    await loadedRows();
+   562	
+   563	    // status 200 and headers arrive, then the connection drops
+   564	    server.once('GET', '/api/certificates/export.csv', () => ({
+   565	      ok: true,
+   566	      status: 200,
+   567	      headers: new Headers({ 'Content-Disposition': recorded.tenants[ALICE].exportCsv.contentDisposition }),
+   568	      blob: async () => {
+   569	        throw new TypeError('network error');
+   570	      },
+   571	    }));
+   572	    await user.click(screen.getByTestId('export-button'));
+   573	    expect((await screen.findByRole('alert')).textContent).toContain('Export failed: The answer from the server could not be read');
+   574	    expect(saved).toEqual([]);
+   575	  });
+   576	
+   577	  it("exports the other tenant's file after an actor switch", async () => {
+   578	    const saved = captureDownloads();
+   579	    const { server, user } = openConsole();
+   580	    await loadedRows();
+   581	    await user.selectOptions(screen.getByTestId('actor-select'), BOB);
+   582	    await loadedRows();
+   583	
+   584	    await user.click(screen.getByTestId('export-button'));
+   585	    expect((await screen.findByTestId('export-done')).textContent).toContain('certificates-west-');
+   586	    expect(exportRequests(server).map((request) => request.actor)).toEqual([BOB]);
+   587	    expect(await saved[0].blob.text()).toBe(recorded.tenants[BOB].exportCsv.body);
+   588	  });
+   589	});
