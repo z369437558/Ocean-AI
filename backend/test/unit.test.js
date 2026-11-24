@@ -6,6 +6,7 @@ import path from 'node:path';
 import { Writable } from 'node:stream';
 import { after, before, describe } from 'node:test';
 
+import { openInitializedDatabase } from '../src/bootstrap.js';
 import { loadConfig, reachableHost } from '../src/config.js';
 import { formatGeneratedSerial } from '../src/db/generate.js';
 import { SCHEMA_VERSION, migrate } from '../src/db/schema.js';
@@ -77,6 +78,10 @@ describe('CSV encoding', () => {
     assert.equal(csvCell('+61 400 000 000'), "'+61 400 000 000");
     assert.equal(csvCell('@handle'), "'@handle");
     assert.equal(csvCell('-1'), "'-1");
+    // A tab or a carriage return in front does not hide a formula from a spreadsheet either.
+    assert.equal(csvCell('\t=SUM(A1:A9)'), "'\t=SUM(A1:A9)");
+    assert.equal(csvCell('\r=1+1'), '"\'\r=1+1"', 'and a carriage return needs quoting as well');
+    assert.equal(csvCell('a\tb'), 'a\tb', 'a tab further in is just a tab');
     assert.equal(csvCell('2026-01-11 00:30'), '2026-01-11 00:30');
   });
 
@@ -705,10 +710,52 @@ describe('database layer', () => {
     }
   });
 
+  it('opening the database for the server ends with that question, and a "no" leaves no connection open', () => {
+    // Permissions are checked before the file is opened (see the start-up tests); what they do
+    // not show - a read-only volume, say - only the database itself can tell. Here it is made
+    // to say no.
+    const file = path.join(dir, 'asked.sqlite');
+    openInitializedDatabase(file).close();
+    const asked = [];
+    const assertWritable = Connection.prototype.assertWritable;
+    Connection.prototype.assertWritable = function refuses() {
+      asked.push(this.inTransaction);
+      throw new Error('the database cannot be written to (simulated)');
+    };
+    try {
+      assert.throws(() => openInitializedDatabase(file), /^Error: the database cannot be written to \(simulated\)$/);
+    } finally {
+      Connection.prototype.assertWritable = assertWritable;
+    }
+    assert.deepEqual(asked, [false], 'asked once, after schema and demo data, outside any transaction');
+    // Nothing of the refused attempt is still holding the file: with no connection left, closing
+    // this one removes the write-ahead log, which SQLite only does for the last connection.
+    openInitializedDatabase(file).close();
+    assert.equal(fs.existsSync(`${file}-wal`), false);
+  });
+
   it('creates missing directories for a new database, and fails plainly where it cannot', () => {
     const nested = path.join(dir, 'made', 'on', 'demand', 'new.sqlite');
     openDatabase(nested).close();
     assert.equal(fs.existsSync(nested), true);
+
+    // Two processes that start at the same moment both find the directory missing; the slower
+    // one is told "it exists" when it tries to create it. That is no reason to fail.
+    const raced = path.join(dir, 'made', 'at', 'the', 'same', 'moment', 'new.sqlite');
+    const mkdirSync = fs.mkdirSync;
+    const overtaken = [];
+    fs.mkdirSync = (target, ...rest) => {
+      mkdirSync(target, ...rest); // the other process got there first ...
+      overtaken.push(path.basename(target));
+      return mkdirSync(target, ...rest); // ... so for this one the directory exists already: EEXIST
+    };
+    try {
+      openDatabase(raced).close();
+    } finally {
+      fs.mkdirSync = mkdirSync;
+    }
+    assert.deepEqual(overtaken, ['at', 'the', 'same', 'moment'], 'one level at a time, each of them lost to the other process');
+    assert.equal(fs.existsSync(raced), true);
 
     const blocker = path.join(dir, 'a-file');
     fs.writeFileSync(blocker, 'not a directory');

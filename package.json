@@ -13,14 +13,12 @@
   },
   "scripts": {
     "prestart": "node scripts/preflight.mjs",
-    "start": "npm install --include=dev --no-audit --no-fund && npm run build --workspace frontend && npm run start --workspace backend",
+    "start": "npm install --include=dev --no-audit --no-fund && npm run build --workspace frontend && node backend/src/server.js",
     "pretest": "node scripts/preflight.mjs",
     "test": "npm install --include=dev --no-audit --no-fund && npm run test --workspace backend && npm run test --workspace frontend",
-    "serve": "npm run start --workspace backend",
-    "build": "npm run build --workspace frontend",
     "dev": "node scripts/dev.mjs",
-    "db:reset": "npm run db:reset --workspace backend --",
-    "generate:east": "npm run generate:east --workspace backend --"
+    "db:reset": "node backend/scripts/init-db.js --reset",
+    "generate:east": "node backend/scripts/generate-certificates.js --tenant East --count 100000"
   },
   "allowScripts": {
     "better-sqlite3": true

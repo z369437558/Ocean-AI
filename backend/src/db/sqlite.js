@@ -382,6 +382,41 @@ function createDirectory(dir) {
   }
 }
 
+const mayWrite = (target) => {
+  try {
+    fs.accessSync(target, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Refuses an existing database that this process may read but not write - before SQLite opens it.
+ *
+ * SQLite would open such a file without a word, read-only, and create its write-ahead log and the
+ * index of that log next to it with the same read-only permissions. Those two would then keep the
+ * database read-only after the permissions of the file itself have been put right. So nothing is
+ * opened: a refused database is left exactly as it was found, and the message names what is in
+ * the way (which may be such a left-over file from somebody else's attempt).
+ *
+ * This is the check by permissions; Connection.assertWritable is the one by trying, for what
+ * permissions do not show (a read-only volume, for instance).
+ */
+function assertFilesWritable(file) {
+  if (!fs.existsSync(file)) return; // a new database: creating it is the test
+  const real = fs.realpathSync(file); // SQLite keeps the side files next to the file a link points to
+  const sideFiles = [`${real}-wal`, `${real}-shm`];
+  const readOnly = [real, ...sideFiles].find((existing) => fs.existsSync(existing) && !mayWrite(existing));
+  if (readOnly) {
+    const what = readOnly === real ? 'the file' : `the file ${path.basename(readOnly)} next to it`;
+    throw new Error(`the database cannot be written to (${what} is read-only for this user)`);
+  }
+  if (!sideFiles.every((sideFile) => fs.existsSync(sideFile)) && !mayWrite(path.dirname(real))) {
+    throw new Error(`the database cannot be written to (no file can be created next to it, in ${path.dirname(real)})`);
+  }
+}
+
 /**
  * Opens (and creates, if needed) the database file.
  *
@@ -400,6 +435,7 @@ export function openDatabase(file, { queryOnly = false } = {}) {
     if (!fs.existsSync(resolved)) throw new Error(`Database file does not exist: ${resolved}`);
   } else {
     createDirectory(path.dirname(resolved));
+    assertFilesWritable(resolved);
   }
 
   const connection = new Connection(driver.open(resolved), resolved);

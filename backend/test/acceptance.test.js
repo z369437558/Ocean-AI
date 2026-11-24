@@ -13,6 +13,7 @@ import { after, before, describe } from 'node:test';
 
 import { createApp } from '../src/app.js';
 import { openInitializedDatabase } from '../src/bootstrap.js';
+import { resolveUserPath } from '../src/config.js';
 import { TransactionAbortedError, openDatabase } from '../src/db/sqlite.js';
 import { findActorByEmail } from '../src/services/actors.js';
 import { bulkIssue as bulkIssueElsewhere } from '../src/services/bulkIssue.js';
@@ -23,7 +24,6 @@ import {
   BOB,
   SEED,
   assertSameRows,
-  canOpen,
   clientFor,
   countRows,
   createTempDir,
@@ -31,6 +31,7 @@ import {
   insertCourse,
   insertLearner,
   it,
+  launcherBoundByPermissions,
   openStream,
   parseCsv,
   referenceFold,
@@ -43,7 +44,6 @@ import {
   startServer,
   stillPending,
   timed,
-  unprivilegedSpawnOptions,
   until,
 } from './helpers.js';
 
@@ -2408,28 +2408,57 @@ describe('start-up and maintenance commands', () => {
   it('a database file that cannot be written to is refused at start-up, not at the first write', async (t) => {
     // A directory anybody may use, with a database file in it that only its owner could write -
     // and the owner has taken that right away too. The administrator can write to it all the
-    // same, so a suite that runs as root starts the server as the system's unprivileged user.
+    // same, so a suite that runs as root starts the server without that privilege, or as the
+    // system's unprivileged user (see launcherBoundByPermissions).
     const shared = createTempDir('cert-admin-read-only-');
     try {
       fs.chmodSync(shared, 0o777);
       const dbPath = path.join(shared, 'read-only.sqlite');
       await runScript('init-db.js', ['--db', dbPath]);
       fs.chmodSync(dbPath, 0o444);
-      const spawnOptions = unprivilegedSpawnOptions([dbPath]);
-      if (spawnOptions === null) {
-        t.skip('running as root on a system without an unprivileged user that can run this project');
+      const launcher = launcherBoundByPermissions({ mustRead: [dbPath], mustNotWrite: dbPath });
+      if (launcher.unavailable) {
+        t.skip(`no way here to start a server that the permissions of a file apply to: ${launcher.unavailable}`);
         return;
       }
-      if (canOpen(dbPath, 'r+', spawnOptions)) {
-        t.skip('the file system does not enforce the read-only permission, so the situation cannot be set up here');
-        return;
+      const refused = async (reason) => {
+        const { code, output } = await runServerToExit(dbPath, { launcher });
+        assert.equal(code, 1, output);
+        assert.equal(output.trim().split('\n').length, 1, output);
+        assert.ok(output.startsWith(`Could not open the database at ${dbPath}: the database cannot be written to (${reason})`), output);
+      };
+
+      await refused('the file is read-only for this user');
+      // The refusal leaves the directory as it was: no write-ahead log, no index of it. (SQLite
+      // would create both with the permissions of the database file, i.e. read-only.)
+      assert.deepEqual(fs.readdirSync(shared), ['read-only.sqlite']);
+
+      // Such a left-over - from another program, or an earlier version of this one - keeps the
+      // database read-only whatever the permissions of the file itself: the message names it.
+      fs.chmodSync(dbPath, 0o666);
+      const leftOver = `${dbPath}-shm`;
+      fs.writeFileSync(leftOver, Buffer.alloc(32768));
+      fs.chmodSync(leftOver, 0o444);
+      await refused('the file read-only.sqlite-shm next to it is read-only for this user');
+      fs.rmSync(leftOver);
+
+      // A file that may be written in a directory that may not: the log could not be created.
+      fs.chmodSync(shared, 0o555);
+      try {
+        await refused(`no file can be created next to it, in ${shared}`);
+      } finally {
+        fs.chmodSync(shared, 0o777);
       }
-      const { code, output } = await runServerToExit(dbPath, { spawnOptions });
-      assert.equal(code, 1, output);
-      assert.match(output, /^Could not open the database at .*: the database cannot be written to/);
-      assert.equal(output.trim().split('\n').length, 1, output);
-      // Nothing was changed on the way: the same file still opens for whoever may write it.
-      fs.chmodSync(dbPath, 0o644);
+      assert.deepEqual(fs.readdirSync(shared), ['read-only.sqlite']);
+
+      // With the permissions put right the same file starts, with everything in it.
+      const server = await startServer(dbPath, { launcher });
+      try {
+        const list = await clientFor(server.baseUrl, ALICE).get('/api/certificates');
+        assert.equal(list.json.total, SEED.east.certificateCount);
+      } finally {
+        await server.stop();
+      }
       const db = openDatabase(dbPath);
       try {
         assert.deepEqual(totals(db), PRISTINE);
@@ -2460,12 +2489,23 @@ describe('start-up and maintenance commands', () => {
     }
   });
 
-  it('the root npm scripts hand their arguments on to the backend scripts', () => {
+  it('the root npm scripts run the backend commands themselves, so arguments and relative paths arrive as typed', () => {
     const { scripts } = JSON.parse(fs.readFileSync(path.resolve('..', 'package.json'), 'utf8'));
-    // "npm run db:reset -- --db file" only reaches the script when the root script ends in "--".
+    const backend = JSON.parse(fs.readFileSync('package.json', 'utf8')).scripts;
+    // "npm run db:reset -- --db file" appends its arguments to the script, so the script has to end
+    // with the command they are meant for. And it must not start another npm for it: that one would
+    // forget where the command was typed (INIT_CWD), and a relative --db or DB_PATH would land in
+    // the project root instead.
     for (const name of ['db:reset', 'generate:east']) {
-      assert.match(scripts[name], new RegExp(`^npm run ${name} --workspace backend --$`), name);
+      assert.equal(scripts[name], backend[name].replace(/^node /, 'node backend/'), name);
+      assert.doesNotMatch(scripts[name], /npm /, name);
     }
+    assert.match(scripts.start, /&& node backend\/src\/server\.js$/, 'the server is the last step of "npm start", started directly');
+    assert.equal(backend.start, 'node src/server.js');
+
+    // The same from a directory below the project: relative to where it is typed.
+    assert.equal(resolveUserPath('rel.sqlite', { INIT_CWD: path.join(dir, 'typed', 'here') }), path.join(dir, 'typed', 'here', 'rel.sqlite'));
+    assert.equal(resolveUserPath(path.join(dir, 'absolute.sqlite'), { INIT_CWD: '/somewhere/else' }), path.join(dir, 'absolute.sqlite'));
   });
 
   it('every setting is checked before anything starts, each with its own one-line message', async () => {

@@ -63,13 +63,14 @@ export function removeTempDir(dir) {
  * Runs a node entry point of the backend to completion: `{ code, output }` (stdout + stderr).
  * A process that is still running after `timeoutMs` is killed and reported with `code: null`.
  */
-function runNodeToExit(args, { env = {}, timeoutMs = 180_000, spawnOptions = {} } = {}) {
+function runNodeToExit(args, { env = {}, timeoutMs = 180_000, launcher = AS_IS } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, {
+    const [command, ...commandArgs] = [...launcher.prefix, process.execPath, ...args];
+    const child = spawn(command, commandArgs, {
       cwd: BACKEND_DIR,
-      env: { ...inheritedEnv(spawnOptions), ...env },
+      env: { ...inheritedEnv(launcher), ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
-      ...spawnOptions,
+      ...launcher.spawnOptions,
     });
     let output = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
@@ -87,13 +88,18 @@ function runNodeToExit(args, { env = {}, timeoutMs = 180_000, spawnOptions = {} 
 }
 
 /**
- * The environment a child process starts from. A process that runs as another user (see
- * unprivilegedSpawnOptions) gets a clean one: what this process inherited - a home directory,
- * certificate bundles, npm settings - points to places that user may not be able to read, and
- * Node.js complains about some of them on stderr.
+ * How a child process is started: `prefix` goes before the node command, `spawnOptions` to spawn.
+ * AS_IS changes nothing; launcherBoundByPermissions (below) returns the other ones.
  */
-function inheritedEnv(spawnOptions = {}) {
-  return spawnOptions.uid === undefined ? process.env : { PATH: process.env.PATH };
+const AS_IS = { prefix: [], spawnOptions: {} };
+
+/**
+ * The environment a child process starts from. A process that runs as another user gets a clean
+ * one: what this process inherited - a home directory, certificate bundles, npm settings - points
+ * to places that user may not be able to read, and Node.js complains about some of them on stderr.
+ */
+function inheritedEnv(launcher) {
+  return launcher.spawnOptions.uid === undefined ? process.env : { PATH: process.env.PATH };
 }
 
 /** Runs a CLI script from backend/scripts and resolves with its combined output; rejects on a non-zero exit. */
@@ -127,19 +133,49 @@ const serverEnv = (dbPath, env) => ({
 const EXIT_WITH_PARENT = path.join('test', 'support', 'exit-with-parent.mjs');
 
 /** For start-ups that are expected to fail: runs `src/server.js` until it exits, `{ code, output }`. */
-export function runServerToExit(dbPath, { env = {}, spawnOptions } = {}) {
-  return runNodeToExit([path.join('src', 'server.js')], { env: serverEnv(dbPath, env), timeoutMs: 20_000, spawnOptions });
+export function runServerToExit(dbPath, { env = {}, launcher } = {}) {
+  return runNodeToExit([path.join('src', 'server.js')], { env: serverEnv(dbPath, env), timeoutMs: 20_000, launcher });
 }
 
 /**
- * For tests about files the server may not write. The administrator may write every file, so a
- * suite that runs as root (in a container, typically) has to start the server as somebody else:
- * returns the spawn options for the system's unprivileged user ("nobody"), or null where there is
- * none or it cannot run this project (no access to Node.js, to the sources or to `needs`).
- * For any other user it returns {}: the server runs as the user of the suite.
+ * A way to start processes that file permissions apply to, for tests about files the server may
+ * read but not write. Permissions do not apply to root - which is who runs the suite in a typical
+ * container - so there another way is needed. In order of preference:
+ *
+ *   1. "setpriv" (util-linux) starts the process without the one capability that lets root ignore
+ *      permissions. It stays root otherwise, so it can read the checkout wherever that lives.
+ *   2. The system's unprivileged user "nobody" - if that user can read the checkout, which it
+ *      cannot below a directory such as /root.
+ *
+ * The launcher returned can read the server's sources and `mustRead`, and cannot write
+ * `mustNotWrite`; pass it to runServerToExit / startServer. Where no way works the result is
+ * `{ unavailable: why }`. For any user but root the first candidate is "as it is".
  */
-export function unprivilegedSpawnOptions(needs = []) {
-  if (process.getuid?.() !== 0) return {};
+export function launcherBoundByPermissions({ mustRead = [], mustNotWrite }) {
+  const candidates = [];
+  if (process.getuid?.() !== 0) {
+    candidates.push({ name: 'this user', ...AS_IS });
+  } else {
+    candidates.push({ name: 'root without CAP_DAC_OVERRIDE (setpriv)', prefix: ['setpriv', '--bounding-set=-dac_override'], spawnOptions: {} });
+    const nobody = unprivilegedUser();
+    if (nobody) candidates.push({ name: 'the user "nobody"', prefix: [], spawnOptions: nobody });
+  }
+  const refused = [];
+  for (const candidate of candidates) {
+    const unreadable = [path.join(BACKEND_DIR, 'src', 'server.js'), ...mustRead].find((file) => !canOpen(file, 'r', candidate));
+    if (unreadable) {
+      refused.push(`${candidate.name} cannot be used or cannot read ${unreadable}`);
+    } else if (canOpen(mustNotWrite, 'r+', candidate)) {
+      refused.push(`${candidate.name} can write to a read-only file`);
+    } else {
+      return candidate;
+    }
+  }
+  return { unavailable: refused.join('; ') };
+}
+
+/** uid and gid of the user "nobody", or null where the system has none. */
+function unprivilegedUser() {
   let entry;
   try {
     entry = fs.readFileSync('/etc/passwd', 'utf8').split('\n').map((line) => line.split(':')).find(([name]) => name === 'nobody');
@@ -147,19 +183,20 @@ export function unprivilegedSpawnOptions(needs = []) {
     return null;
   }
   const [uid, gid] = [Number(entry?.[2]), Number(entry?.[3])];
-  if (!Number.isInteger(uid) || !Number.isInteger(gid) || uid === 0) return null;
-  const options = { uid, gid };
-  const readable = [path.join(BACKEND_DIR, 'src', 'server.js'), ...needs];
-  return readable.every((file) => canOpen(file, 'r', options)) ? options : null;
+  return Number.isInteger(uid) && Number.isInteger(gid) && uid !== 0 ? { uid, gid } : null;
 }
 
-/** Whether a process started with `spawnOptions` (see above) can open `file` in the given mode ('r', 'r+'). */
-export function canOpen(file, mode, spawnOptions = {}) {
-  const probe = spawnSync(
+/** Whether a process started through `launcher` can open `file` in the given mode ('r', 'r+'). */
+function canOpen(file, mode, launcher) {
+  const [command, ...commandArgs] = [
+    ...launcher.prefix,
     process.execPath,
-    ['-e', 'const fs = require("node:fs"); fs.closeSync(fs.openSync(process.argv[1], process.argv[2]))', file, mode],
-    { ...spawnOptions, env: inheritedEnv(spawnOptions), cwd: BACKEND_DIR, stdio: 'ignore' },
-  );
+    '-e',
+    'const fs = require("node:fs"); fs.closeSync(fs.openSync(process.argv[1], process.argv[2]))',
+    file,
+    mode,
+  ];
+  const probe = spawnSync(command, commandArgs, { ...launcher.spawnOptions, env: inheritedEnv(launcher), cwd: BACKEND_DIR, stdio: 'ignore' });
   return probe.status === 0;
 }
 
@@ -167,13 +204,21 @@ export function canOpen(file, mode, spawnOptions = {}) {
  * Starts `src/server.js` on a free port and resolves once it accepts requests. `expectHost` is the
  * host the start-up line is expected to name (serverEnv pins HOST to 127.0.0.1).
  */
-export function startServer(dbPath, { env = {}, expectHost = '127.0.0.1' } = {}) {
+export function startServer(dbPath, { env = {}, expectHost = '127.0.0.1', launcher = AS_IS } = {}) {
   return new Promise((resolve, reject) => {
     // stdin is a pipe held by this process: see test/support/exit-with-parent.mjs.
-    const child = spawn(process.execPath, ['--import', `./${EXIT_WITH_PARENT.replaceAll(path.sep, '/')}`, path.join('src', 'server.js')], {
+    const [command, ...commandArgs] = [
+      ...launcher.prefix,
+      process.execPath,
+      '--import',
+      `./${EXIT_WITH_PARENT.replaceAll(path.sep, '/')}`,
+      path.join('src', 'server.js'),
+    ];
+    const child = spawn(command, commandArgs, {
       cwd: BACKEND_DIR,
-      env: { ...process.env, ...serverEnv(dbPath, env) },
+      env: { ...inheritedEnv(launcher), ...serverEnv(dbPath, env) },
       stdio: ['pipe', 'pipe', 'pipe'],
+      ...launcher.spawnOptions,
     });
     child.stdin.on('error', () => {}); // the server may already be gone when the pipe is closed
     let output = '';

@@ -5,10 +5,16 @@
  * through console.error. Anything on console.error or console.warn therefore fails the test that
  * caused it, unless the test announced it with `expectConsoleError`.
  */
-import { cleanup } from '@testing-library/react';
+import { cleanup, configure } from '@testing-library/react';
 import { afterEach, beforeEach, expect, vi } from 'vitest';
 
 import { consoleGuard } from './support/console.js';
+
+// How long `findBy...` and `waitFor` keep looking. What they wait for normally arrives within
+// milliseconds, and then they return at once - the limit only matters on a machine that is busy
+// with other things, where the default of one second has been seen to run out with nothing wrong.
+// (vite.config.js raises the limit per test to match.)
+configure({ asyncUtilTimeout: 5_000 });
 
 beforeEach(() => {
   consoleGuard.start();

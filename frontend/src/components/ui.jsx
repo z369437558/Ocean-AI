@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 
 export function Spinner({ label }) {
   return (
@@ -171,9 +171,14 @@ export function Dialog({ title, onClose, locked = false, variant = 'modal', chil
   const lockedRef = useRef(locked);
   lockedRef.current = locked;
 
-  useEffect(() => {
+  const openerRef = useRef(null); // what had the focus when the dialog opened
+
+  // A layout effect: it runs in the same step in which the dialog enters or leaves the page. The
+  // page behind is inert exactly as long as the dialog is there - never a moment later, when the
+  // dialog is gone already and the page would still refuse every key and click.
+  useLayoutEffect(() => {
     const panel = panelRef.current;
-    const previouslyFocused = document.activeElement; // read first: becoming inert takes the focus away
+    openerRef.current = document.activeElement; // read first: becoming inert takes the focus away
     const releaseRest = makeRestInert(panel.parentElement);
     panel.focus();
     const onKeyDown = (event) => {
@@ -190,14 +195,24 @@ export function Dialog({ title, onClose, locked = false, variant = 'modal', chil
     document.addEventListener('keydown', onKeyDown);
     return () => {
       document.removeEventListener('keydown', onKeyDown);
-      releaseRest(); // before the focus goes back: nothing inert can take it
-      if (previouslyFocused instanceof HTMLElement && document.contains(previouslyFocused)) {
-        previouslyFocused.focus();
+      releaseRest();
+    };
+  }, []);
+
+  // Where the focus goes once the dialog is gone. An ordinary effect, on purpose: its clean-up
+  // runs when the page has been updated as a whole, so "does the element that opened the dialog
+  // still exist?" has its final answer. (The update that closes a confirmation can be the one that
+  // removes the button which opened it: the Revoke button of a certificate that is revoked now.)
+  useEffect(() => {
+    const panel = panelRef.current;
+    return () => {
+      const opener = openerRef.current;
+      if (opener instanceof HTMLElement && document.contains(opener)) {
+        opener.focus();
         return;
       }
-      // The element that opened this dialog no longer exists (the Revoke button of a certificate
-      // that is revoked now). The focus would then drop to <body>, behind a dialog that is still
-      // open, and the next Tab would leave it: hand the focus to the top-most remaining dialog.
+      // Without its opener the focus would drop to <body>, behind a dialog that is still open, and
+      // the next Tab would start from there: hand it to the top-most remaining dialog instead.
       const remaining = [...document.querySelectorAll('[role="dialog"]')].filter((dialog) => dialog !== panel);
       remaining[remaining.length - 1]?.focus();
     };

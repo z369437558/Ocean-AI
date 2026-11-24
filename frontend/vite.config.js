@@ -32,5 +32,9 @@ export default defineConfig({
     setupFiles: ['test/setup.js'],
     restoreMocks: true,
     unstubGlobals: true,
+    // Generous on purpose: the tests wait for events, not for time to pass, so a limit that is
+    // never reached costs nothing - and a tight one fails tests on a busy machine (test/setup.js).
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
   },
 });

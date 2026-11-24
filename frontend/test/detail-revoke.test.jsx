@@ -733,8 +733,8 @@ describe('Dialogs are modal: only the top-most one can be operated', () => {
 
     await user.keyboard('{Escape}');
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(inert(link)).toBe(false);
-    expect(document.activeElement).toBe(link); // the keyboard continues where it left the list
+    expect(inert(link)).toBe(false); // in the same step as the drawer goes
+    await expectFocusOn(() => link); // the keyboard continues where it left the list
   });
 
   it('keeps Tab inside the confirmation; the drawer underneath is out of reach until it closes', async () => {
@@ -809,14 +809,54 @@ describe('Dialogs are modal: only the top-most one can be operated', () => {
     expect(server.sent('POST', REVOKE_4)).toHaveLength(1);
   });
 
-  it('gives the page back when a deep link is left with both dialogs open', async () => {
-    await openRevokeConfirmation();
-    expect(document.querySelectorAll('[inert]').length).toBeGreaterThan(0);
+  it("leaving with the browser's Back button while a revocation is in flight does not cancel it: the list shows how it ended", async () => {
+    const server = startFakeServer();
+    const gate = deferred();
+    server.once('POST', REVOKE_4, async (_request, respond) => {
+      await gate.promise;
+      return respond();
+    });
+    await openRevokeConfirmation({ server });
+    await loadedRows();
+    fireEvent.click(screen.getByTestId('revoke-confirm'));
+    expect(screen.getByTestId('revoke-confirm').disabled).toBe(true);
+    await expectStatusInList('EAST-0000004', 'Active');
+
     act(() => {
-      window.location.hash = '#/certificates'; // the browser's Back button
+      window.location.hash = '#/certificates'; // nothing on the page closes the locked confirmation; the browser can
     });
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(document.querySelector('[inert]')).toBeNull();
+    expect(server.sent('POST', REVOKE_4)).toHaveLength(1); // on its way, and not taken back
+
+    gate.resolve();
+    await expectStatusInList('EAST-0000004', 'Revoked'); // the list was reloaded when the answer came
+    expect(screen.queryByRole('dialog')).toBeNull(); // and nothing pops up again
+  });
+
+  it('gives the page back when a deep link is left with both dialogs open - in the same step, not a moment later', async () => {
+    await openRevokeConfirmation();
+    expect(document.querySelectorAll('[inert]').length).toBeGreaterThan(0);
+    // How much of the page is still inert at the moment a dialog leaves it?
+    const inertWhenDialogLeft = [];
+    const watcher = new MutationObserver((records) => {
+      const dialogsRemoved = records.flatMap((record) => [...record.removedNodes]).filter((node) => node.nodeType === 1 && node.querySelector('[role="dialog"]'));
+      if (dialogsRemoved.length > 0) inertWhenDialogLeft.push(document.querySelectorAll('[inert]').length);
+    });
+    watcher.observe(document.body, { childList: true, subtree: true });
+    try {
+      act(() => {
+        window.location.hash = '#/certificates'; // the browser's Back button
+      });
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    } finally {
+      watcher.disconnect();
+    }
+    expect(document.querySelector('[inert]')).toBeNull();
+    // Once the last dialog is out of the page nothing is inert any more: there is no moment in
+    // which the page has no dialog and still refuses every key and click.
+    expect(inertWhenDialogLeft.length).toBeGreaterThan(0);
+    expect(inertWhenDialogLeft.at(-1)).toBe(0);
   });
 });
 

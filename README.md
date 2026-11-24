@@ -12,6 +12,17 @@ completions, bulk-issue certificates, revoke them, and export certificate data a
 **Requirements:** Node.js 20.19+ or 22.12+ (any newer release works as well) with npm. Nothing
 else to install. Verified on Node 20.20, 22.23 and 24.22.
 
+**Where to find what:**
+
+| | |
+| --- | --- |
+| One-command start, verification command | [1. Run it](#1-run-it): `npm start`, `npm test` |
+| Actors (request header, no login) | [2. Actors and demo data](#2-actors-and-demo-data): `X-Actor-Email` |
+| Demo data | created by the first start; described in [section 2](#2-actors-and-demo-data) |
+| 100,000 certificates for East | [4. Load-test data](#4-load-test-data-100000-certificates): `npm run generate:east` |
+| A1–A7: how each is met, and how to reproduce it | [6. How the acceptance criteria are met](#6-how-the-acceptance-criteria-are-met), [Reproducing A1–A7 by hand](#reproducing-a1a7-by-hand) |
+| Known defects, unfinished work | [10. Known defects and unfinished work](#10-known-defects-and-unfinished-work) |
+
 ![Certificate list](docs/screenshots/01-certificates.png)
 
 ---
@@ -29,12 +40,13 @@ with the demo data (first run only) and starts the whole app on **http://localho
 npm test
 ```
 
-Runs the verification suite: 190 API tests covering acceptance criteria A1–A7, including the
-100,000-row export checks, followed by 252 UI tests of the four workflows. It uses throw-away
+Runs the verification suite: 191 API tests covering acceptance criteria A1–A7, including the
+100,000-row export checks, followed by 253 UI tests of the four workflows. It uses throw-away
 databases in the OS temp directory and never touches the app's data. Takes about a minute. (One
 API test needs a file the server may read but not write. Root may write every file, so when the
-suite runs as root - in a container, say - that test starts its server as the system's
-unprivileged user `nobody`, and is reported as skipped only where that is not possible.)
+suite runs as root - in a container, say - that test starts its server without that one privilege
+(with `setpriv`) or, failing that, as the unprivileged user `nobody`; where neither is possible
+it is reported as skipped, with the reason.)
 
 Other commands:
 
@@ -44,29 +56,35 @@ Other commands:
 | `npm run generate:east -- --clear`    | Removes the generated certificates again                                     |
 | `npm run db:reset`                    | Restores the pristine quick-start dataset (safe while the server is running) |
 | `PORT=4000 npm start`                 | Use another port (more settings below)                                       |
-| `npm run dev`                         | Development mode: API with auto-restart + Vite dev server on :5173 (after one `npm start` or `npm install`) |
+| `npm run dev`                         | Development mode: API with auto-restart + Vite dev server on :5173           |
 
-Data lives in `data/cert-admin.sqlite` and survives restarts.
+`npm start` and `npm test` install what they need. The other commands rely on that having happened
+once - `npm run dev` says so in one line if it has not. Data lives in `data/cert-admin.sqlite` and
+survives restarts.
 
 Settings, all optional, are environment variables; one that is set but blank (empty, or nothing
 but white space) counts as not set, and numbers are written in plain decimal digits. A value that
 cannot be used is reported in one line and nothing starts: the settings are checked first, then
 the port is claimed, and only then is the database opened (or created) - a start that fails on a
 setting or on the port does not leave a database file behind. A database that cannot be written
-to (a read-only file or directory) is refused at that point as well, not at the first write. The
-line printed after a successful start names the address to open: `localhost` when the server
-listens on all interfaces, the configured `HOST` otherwise.
+to (a read-only file or directory) is refused at that point as well, not at the first write, and
+is left exactly as it was found. The line printed after a successful start names the address to
+open: `localhost` when the server listens on all interfaces, the configured `HOST` otherwise.
 
 | Variable                 | Default                  | Meaning |
 | ------------------------ | ------------------------ | ------- |
 | `PORT`                   | `3000`                   | HTTP port |
 | `HOST`                   | all interfaces           | Address to listen on (`127.0.0.1` = this machine only) |
 | `DB_PATH`                | `data/cert-admin.sqlite` | Database file |
+| `STATIC_DIR`             | `frontend/dist`          | Directory with the built UI that the server serves (`npm start` builds it there) |
 | `LOG_REQUESTS`           | `1` (on)                 | `0` turns the request log off |
 | `DB_BUSY_TIMEOUT_MS`     | `10000`                  | How long a write waits for another process's write lock before answering 503 |
 | `EXPORT_MAX_CONCURRENT`  | `4`                      | CSV exports that read at the same time; further ones wait their turn |
 | `EXPORT_IDLE_TIMEOUT_MS` | `300000`                 | A download that makes no progress for this long is dropped (`0` = never) |
 | `SQLITE_DRIVER`          | automatic                | `better-sqlite3` or `node` to force one of the two drivers |
+
+A relative path - in `DB_PATH`, `STATIC_DIR` or after `--db` - is taken from the directory the
+command is typed in.
 
 The examples in this README are written for a POSIX shell (macOS, Linux, Git Bash or WSL on
 Windows). In PowerShell set a variable first, for example `$env:PORT=4000; npm start`; the `npm`
@@ -119,8 +137,9 @@ certificates issued minutes before and after both 2026 daylight-saving transitio
   when the answer was lost on the way - *may or may not have been revoked*. In that last case the
   console asks the server for the current state right away and says so once the certificate turns
   out to be revoked. Drawer and confirmation are modal: Tab stays inside the one on top, and
-  nothing behind it can be operated - a confirmation whose request is on its way can neither be
-  closed nor bypassed.
+  nothing behind it can be operated - while its request is on its way, nothing on the page closes
+  or bypasses a confirmation. (Leaving with the browser's Back button still does; the request is
+  not cancelled by that, and the list shows how it ended.)
 - **Export CSV** – downloads exactly the rows of the current search, status filter and sort order.
   Leaving the page or switching the actor cancels an export that is still running. An answer that
   is not a CSV file (say, the sign-in page of a gateway in front of the console) is reported as a
@@ -236,7 +255,8 @@ curl -s -X POST -H "$A" "$URL/api/certificates/3/revoke"   # 200, "alreadyRevoke
 curl -s -H "$A" "$URL/api/certificates/export.csv?q=lee&sort=learner&order=asc"
 ```
 
-A bulk-issue response (abridged: three of its five results):
+A bulk-issue response (abridged: two of its five results are left out, and so are the fields
+`tenant`, `createdAt` and `completedAt` and, in each result, `enrollmentId` and `issuedAt`):
 
 ```json
 {
@@ -278,6 +298,125 @@ quoting, `\n` line endings. Cells that would be interpreted as spreadsheet formu
 | **A6** Export at scale | See [section 7](#7-design-notes). Every ordering ends in `id`, each is backed by an index, and the export streams from a dedicated read-only connection inside a single read snapshot, in steps of 500 rows it has looked at - whether they match the filter or not - with all running exports together taking one step per event-loop iteration. | `scale.test.js` (100,000 generated rows; timings are printed), including exports whose filter matches almost nothing; `acceptance.test.js` › *export plumbing* (slots, stalled, abandoned and pipelined downloads); `unit.test.js` › *export stream*, *turn queue*, *sending a download* |
 | **A7** Revocation audit | `UPDATE … WHERE status = 'active'` and the audit insert share one transaction; the audit event is written only if the update changed a row. Repeats and races return 200 with `alreadyRevoked: true` and write nothing. | *A7* › single revoke, repeats, 12 concurrent revokes; *A2 – write lock* › the same revocation sent to two servers at once (three requests each), and queued revocations overtaken by another process (certificate revoked, or gone, meanwhile) |
 
+### Reproducing A1–A7 by hand
+
+`npm test` checks all of this automatically. The steps below show each criterion on the running
+app instead: start it as in section 1, then use a second terminal (POSIX shell with `curl`;
+`node` prints one JSON answer readably). They begin with the quick-start data and are meant to be
+run in this order - A3 and A4 use the answers of A2.
+
+```bash
+npm run db:reset
+A='X-Actor-Email: alice@east.test'; B='X-Actor-Email: bob@west.test'
+URL=http://localhost:3000; J='Content-Type: application/json'
+```
+
+**A1 – tenant isolation.**
+
+```bash
+curl -s -H "$A" "$URL/api/certificates" | grep -o '"serialNumber":"[A-Z]*' | sort | uniq -c   # 7 x EAST
+curl -s -H "$B" "$URL/api/certificates" | grep -o '"serialNumber":"[A-Z]*' | sort | uniq -c   # 4 x WEST
+curl -s -w ' -> %{http_code}\n' -H "$B" "$URL/api/certificates/1"        # East's certificate as West: 404 ...
+curl -s -w ' -> %{http_code}\n' -H "$B" "$URL/api/certificates/999999"   # ... word for word the answer for an id that does not exist
+curl -s -w ' -> %{http_code}\n' -X POST -H "$B" -H "$J" -H 'Idempotency-Key: a1' \
+     -d '{"courseId": 1}' "$URL/api/bulk-issues"                          # East's course as West: 404 "Course not found"
+curl -s -H "$A" "$URL/api/certificates?pageSize=1" | grep -o '"total":[0-9]*'   # East still has 7 certificates,
+curl -s -H "$A" "$URL/api/audit-events"            | grep -o '"total":[0-9]*'   # 8 audit events
+curl -s -H "$A" "$URL/api/bulk-issues"                                          # and no operation: {"items":[]}
+```
+
+In the UI: act as Bob and open `http://localhost:3000/#/certificates/1` - *Certificate not found*.
+
+**A2 – one key is one operation, sequentially and concurrently.**
+
+```bash
+for i in 1 2 3; do            # sequential: executed once, then the stored answer
+  curl -s -i -X POST -H "$A" -H "$J" -H 'Idempotency-Key: demo-seq' -d '{"courseId": 2}' "$URL/api/bulk-issues" \
+    | grep -iE '^HTTP|^idempotent-replayed'
+done                          # 201 + "Idempotent-Replayed: false", then twice 201 + "true"
+
+seq 20 | xargs -P 20 -I{} curl -s -X POST -H "$A" -H "$J" -H 'Idempotency-Key: demo-par' \
+     -d '{"courseId": 1}' "$URL/api/bulk-issues" -o /tmp/a2-{}.json        # 20 requests at once, one key
+sort -u /tmp/a2-*.json | wc -l                                                    # 1: all twenty answers are the same
+curl -s -H "$A" "$URL/api/bulk-issues" | grep -o '"id":[0-9]*,"status"' | wc -l   # 2 operations, one per key
+curl -s -H "$A" "$URL/api/certificates?pageSize=1" | grep -o '"total":[0-9]*'     # 10 certificates: 7 + 1 + 2
+curl -s -H "$A" "$URL/api/audit-events?action=certificate.issued" | grep -o '"total":[0-9]*'   # 10: one issue event each
+```
+
+**A3 – the same key with another payload.**
+
+```bash
+curl -s -w ' -> %{http_code}\n' -X POST -H "$A" -H "$J" -H 'Idempotency-Key: demo-par' \
+     -d '{"courseId": 3}' "$URL/api/bulk-issues"                           # 409 idempotency_key_reused
+curl -s -X POST -H "$A" -H "$J" -H 'Idempotency-Key: demo-par' -d '{"courseId": 1}' "$URL/api/bulk-issues" \
+  | cmp - /tmp/a2-1.json && echo 'first result intact'                    # the original request still gets the first answer
+curl -s -H "$A" "$URL/api/bulk-issues" | grep -o '"id":[0-9]*,"status"' | wc -l   # still 2 operations
+```
+
+**A4 – the outcome of every learner.**
+
+```bash
+node -e 'const o = require("/tmp/a2-1.json"); console.log(o.summary);
+  for (const r of o.results) console.log(r.learnerName.padEnd(16), r.outcome, r.reason ?? "", r.serialNumber ?? "")'
+# { total: 5, issued: 2, skipped: 3, failed: 0 }
+# Alex Lee         skipped already_certified EAST-0000001
+# Marcus O'Connor  issued  EAST-0000009
+# Mei Chen         skipped not_completed
+# Priya Sharma     issued  EAST-0000010
+# Tom Walker       skipped not_completed
+```
+
+A `failed` outcome needs a write that goes wrong for one learner, which cannot be provoked from
+outside; the tests do it by injecting the fault (`acceptance.test.js` › *bulk issue with injected
+failures*). The Bulk issue page shows the same outcomes, with the reasons in words.
+
+**A5 – tenant-local dates.**
+
+```bash
+curl -s -H "$A" "$URL/api/certificates/1" | grep -o '"issuedAt":"[^"]*","issuedLocal":"[^"]*"'   # 2026-01-10T13:30:00.000Z -> 2026-01-11 00:30
+curl -s -H "$B" "$URL/api/certificates/8" | grep -o '"issuedAt":"[^"]*","issuedLocal":"[^"]*"'   # the same instant -> 2026-01-10 21:30
+curl -s -H "$A" "$URL/api/certificates/export.csv?sort=issued&order=asc" | head -3   # ordered and printed by the Sydney date
+curl -s -H "$B" "$URL/api/certificates/export.csv?sort=issued&order=asc" | head -3   # ... and by the Perth date
+```
+
+**A6 – 100,000 certificates.**
+
+```bash
+npm run generate:east                           # about 3 s; the server keeps running
+Q='q=an&sort=learner&order=desc'
+time curl -s -H "$A" "$URL/api/certificates/export.csv?$Q" -o /tmp/e1.csv   # well under a second each
+time curl -s -H "$A" "$URL/api/certificates/export.csv?$Q" -o /tmp/e2.csv
+cmp /tmp/e1.csv /tmp/e2.csv && wc -l < /tmp/e1.csv                          # identical; 25,481 lines (header + 25,480 rows)
+
+# equal sort keys come in id order (most rows of this page share their name with the row before):
+curl -s -H "$A" "$URL/api/certificates?sort=learner&order=asc&pageSize=100&page=7" | node -e '
+  const { items } = JSON.parse(require("fs").readFileSync(0));
+  const inOrder = items.every((c, i) => i === 0 || c.learnerName !== items[i - 1].learnerName || c.id > items[i - 1].id);
+  console.log(inOrder ? "ties in ascending id order" : "NOT in id order")'
+
+# list requests are answered (in milliseconds) while three full exports are streaming:
+for i in 1 2 3; do curl -s -H "$A" "$URL/api/certificates/export.csv" -o /dev/null & done
+for i in 1 2 3 4 5 6; do curl -s -o /dev/null -w '%{time_total}s ' -H "$A" "$URL/api/certificates?page=40&pageSize=50"; done; echo; wait
+
+npm run generate:east -- --clear                # back to the quick-start certificates
+```
+
+**A7 – revocation and its audit event.**
+
+```bash
+curl -s -X POST -H "$A" -H "$J" -d '{"reason":"Issued in error"}' "$URL/api/certificates/3/revoke" \
+  | grep -o '"alreadyRevoked":[a-z]*'                                              # false: revoked by this request
+curl -s -X POST -H "$A" "$URL/api/certificates/3/revoke" | grep -o '"alreadyRevoked":[a-z]*'   # true: nothing changes
+curl -s -H "$A" "$URL/api/audit-events?certificateId=3" | grep -o '"action":"[a-z.]*"' | sort | uniq -c
+#   1 "action":"certificate.issued"
+#   1 "action":"certificate.revoked"
+```
+
+In the UI: open a certificate, *Revoke certificate…*, confirm; the audit trail in the drawer shows
+the new event. `npm run db:reset` restores the quick-start data afterwards.
+
+### How the UI side and the numbers are covered
+
 The UI side of these criteria - one request per click however often or wherever it is clicked,
 retries that reuse the idempotency key, confirmation before revoking, truthful messages when an
 answer is lost, export of exactly the current filter, loading / empty / error states - is covered
@@ -285,7 +424,8 @@ by `frontend/test`: the real application is mounted in a simulated browser and t
 server that replays answers recorded from the real backend (`frontend/test/fixtures`; refresh them
 with `node frontend/test/fixtures/record.mjs` after changing the API).
 
-Typical numbers from `npm test` on a 4-core container: filtered and sorted exports of 10,000–100,000
+Typical numbers from `npm test` on an otherwise idle 4-core container (on a machine that is busy
+with other work they are several times larger): filtered and sorted exports of 10,000–100,000
 rows take 0.2–0.3 s each and are byte-identical across runs; while three full 100,000-row exports
 stream concurrently, some 500 list requests are answered with a median of 4 ms and a worst case
 under 20 ms; an export whose filter matches nothing (it still has to look at all 100,000 rows)
@@ -377,12 +517,19 @@ the answers (HTTP pipelining) are answered in order, and an export among them on
 only then takes a slot - when its answer can actually be sent.
 
 A download that cannot be completed never ends quietly. When the server gives one up (the idle
-timeout, a failure while reading) it resets the connection instead of closing it, so that a client
-which does not check how the body is framed - HTTP/1.0, a simple script - cannot take half a file
-for a whole one. The other side of that rule: a client has to keep its sending side open until the
-download is complete. One that half-closes the connection right after its request (`nc -N`, a
-`shutdown(SHUT_WR)` in a script) cannot be told from one that has left, and gets the reset too.
-Browsers, `curl`, `wget` and HTTP libraries do not do that.
+timeout, a failure while reading) it resets the connection instead of closing it. An HTTP/1.1
+client sees from the framing of the body that the file is incomplete either way; the reset is for
+the clients that have no framing to go by - HTTP/1.0, a simple script - and helps as far as their
+network code passes it on: `curl --http1.0` and Python sockets report it as an error, whereas
+netcat and raw Node.js sockets treat a reset that follows data as a plain end and keep the part
+they received.
+
+The other side of that rule: a client has to keep its sending side open until the download is
+complete. One that half-closes the connection right after its request (`nc -N`, a
+`shutdown(SHUT_WR)` in a script) cannot be told from one that has left - and an export must not
+keep reading for a client that is gone, least of all one that has nothing to send to it at the
+moment - so its download is cut short, with the same reset. Browsers, `curl`, `wget` and HTTP
+libraries do not half-close.
 
 **Idempotency details.** `Idempotency-Key` is optional for API callers (the UI always sends one).
 Keys are 1–200 printable ASCII characters. A request that is rejected before execution (400, 404,
@@ -401,12 +548,8 @@ revoked later).
 - *No time-zone maths in the browser.* The API returns ready-to-show local strings, so UI, CSV and
   sort order cannot disagree.
 
-**Deliberately out of scope / next steps.** Real authentication, tenant and course management,
-expiring old idempotency records, re-issuing after revocation, recomputing stored local dates if a
-tenant ever changed its time zone, keyset pagination and a trigram or full-text index for tenants
-far beyond 10⁵ certificates (deep pages and the substring search of a *list* request are linear in
-the tenant's row count today and run in one piece: tens of milliseconds at 100,000 rows), and
-moving very large bulk issues to a background job.
+**Deliberately out of scope, known defects and unfinished work** are listed in
+[section 10](#10-known-defects-and-unfinished-work).
 
 ## 8. Project layout
 
@@ -470,10 +613,12 @@ docs/screenshots/          the images used in this README
 - **"…was installed with another Node.js version"** – the native SQLite module is built for one
   Node.js version. After switching versions run `npm rebuild better-sqlite3` (the message says so),
   or start with `SQLITE_DRIVER=node` on Node ≥ 22.13.
-- **"the database cannot be written to" / "attempt to write a readonly database"** – the database
-  file or its directory is read-only for the user running the server. The server needs to write
-  to both (SQLite keeps its write-ahead log next to the file); fix the permissions or point
-  `DB_PATH` somewhere else.
+- **"the database cannot be written to (…)"** – the user running the server may not write the
+  database file, a `-wal` / `-shm` file next to it, or (when those two do not exist yet) the
+  directory; the text in brackets says which. The server needs all of them: SQLite keeps its
+  write-ahead log next to the database. Fix the permissions of what is named - for a `-wal` or
+  `-shm` file left behind by another program that means making it writable, not deleting it: a
+  `-wal` file can hold data - or point `DB_PATH` somewhere else.
 - **`npm run dev` says the dependencies are not installed** – it does not install anything itself:
   run `npm start` (or `npm install`) once first.
 - **`better-sqlite3` could not be installed** – nothing to do on Node ≥ 22.13: the server logs
@@ -484,12 +629,62 @@ docs/screenshots/          the images used in this README
 - **The app is reachable from other machines** – it listens on all interfaces by default so it also
   works inside containers; set `HOST=127.0.0.1` to restrict it. There is no real authentication.
 
+## 10. Known defects and unfinished work
+
+**Known defects** - behaviour that is wrong or surprising, and that I know of:
+
+- *A very large bulk issue holds every other request up while it runs.* It is one synchronous
+  transaction. Measured: issuing to 20,000 eligible learners takes about one second, and a list
+  request sent meanwhile waits that long. At the sizes of the specification (a course roster) this
+  is milliseconds.
+- *List requests are linear in the tenant's size where the export is not.* The substring search of
+  a list request, and its deep pages (`page=4000`), scan the tenant's rows in one piece: tens of
+  milliseconds at 100,000 certificates, during which other requests wait.
+- *A double click on text in a list row opens the certificate instead of selecting the word.* A
+  click on a row opens the drawer at once; selecting by dragging works, and the same text can be
+  selected in the drawer.
+- *Leaving with the browser's Back button while a revocation is on its way* closes the
+  confirmation without its outcome message. The request is not cancelled; the list shows the result.
+- *A download cut short is not noticed by every client.* The server resets the connection of a
+  download it gives up, but netcat and raw Node.js sockets report a reset after data as a normal
+  end; and a client that half-closes its connection (`nc -N`) or reads more slowly than a few kB/s
+  for five minutes is treated as gone (see *Export without blocking* in section 7).
+- *Idempotency keys are kept for ever.* Nothing expires them, so the table grows by one row per
+  bulk issue.
+- *After a refused `npm run db:reset` on a read-only database* the message ends with a hint about
+  damaged files that does not apply to that case.
+
+**Not verified** - I have no evidence either way:
+
+- Browsers other than Chromium, and real screen readers. Keyboard operation, focus handling and the
+  accessibility tree were checked in Chromium only.
+- Windows. The commands and tests were run on Linux (Node 20.20, 22.23 and 24.22).
+- More than 100,000 certificates per tenant (the generator accepts up to 2,000,000).
+
+**Unfinished work** - not built, and what I would do next:
+
+- *Excluded by the specification:* real authentication and authorisation (the actor header is
+  trusted as it is), deployment, notifications.
+- *Management of tenants, admins, courses, learners and enrollments.* They exist only as seeded
+  demo data; the console reads them.
+- *Very large bulk issues as a background job* with progress, instead of one request.
+- *Keyset pagination and a search index* (trigram or full-text) for tenants far beyond 10⁵
+  certificates.
+- *Re-issuing after a revocation.* Today a learner whose certificate was revoked is skipped with
+  the reason `certificate_revoked`; whether and how to issue again is a policy decision.
+- *Changing a tenant's time zone.* The local issue date is stored with each certificate and would
+  have to be recomputed.
+- *Browser tests in the repository.* The UI tests run the real application in a simulated DOM
+  against recorded API answers; the checks in a real browser were done with throw-away scripts
+  that are not part of the repository.
+- *Continuous integration.* `npm test` is the whole verification; nothing runs it automatically.
+
 ---
 
 ## 中文速览
 
 - **启动**：`npm start`（自动安装依赖、构建前端、初始化演示数据并启动，访问 http://localhost:3000）
-- **验证测试**：`npm test`（接口测试 190 项，覆盖验收标准 A1–A7，含 10 万行导出；界面测试 252 项；约 1 分钟）
+- **验证测试**：`npm test`（接口测试 191 项，覆盖验收标准 A1–A7，含 10 万行导出；界面测试 253 项；约 1 分钟）
 - **生成 10 万条 East 证书**：`npm run generate:east`（不改动默认演示数据；`-- --clear` 可清除）
 - **恢复演示数据**：`npm run db:reset`（服务运行中也可执行）
 - **切换操作者**：页面右上角 *Acting as*，或在请求中带 `X-Actor-Email: alice@east.test` / `bob@west.test`

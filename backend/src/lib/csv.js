@@ -5,8 +5,9 @@ const FORMULA_TRIGGER = /^[=+\-@\t\r]/;
 
 export function csvCell(value) {
   let text = value === null || value === undefined ? '' : String(value);
-  // A cell that starts with = + - @ is executed as a formula by Excel/Sheets. Learner names are
-  // user-controlled, so neutralise those with a leading apostrophe (OWASP CSV-injection guidance).
+  // A cell that starts with = + - @ is executed as a formula by Excel/Sheets, and so is one that
+  // hides such a start behind a tab or a carriage return. Learner names are user-controlled, so
+  // neutralise all of those with a leading apostrophe (OWASP CSV-injection guidance).
   if (FORMULA_TRIGGER.test(text)) text = `'${text}`;
   return NEEDS_QUOTING.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
